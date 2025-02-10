@@ -1,7 +1,11 @@
+from math import ceil
+
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
+
+from einops import repeat
 
 # flex attention
 # https://pytorch.org/blog/flexattention/
@@ -24,6 +28,13 @@ def create_block_causal_mask(seq_len, block_size):
 
     block_mask = create_block_mask(create_mask, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len, _compile = True)
     return block_mask
+
+def nonflex_block_causal_mask(seq_len, block_size, device = None):
+    blocks = ceil(seq_len / block_size)
+
+    causal_mask = torch.ones((blocks, blocks), device = device, dtype = torch.bool).tril()
+    block_causal_mask = repeat(causal_mask, 'i j -> (i bsz1) (j bsz2)', bsz1 = block_size, bsz2 = block_size)
+    return block_causal_mask
 
 # transformer
 
