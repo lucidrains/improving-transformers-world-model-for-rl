@@ -1,3 +1,7 @@
+<img src="./fig1.png" width="450px"/>
+
+<img src="./fig2.png" width="450px"/>
+
 ## Improving Transformers World Model - Pytorch (wip)
 
 Implementation of the new SOTA for model based RL, from the paper [Improving Transformer World Models for Data-Efficient RL](https://arxiv.org/abs/2502.01591), in Pytorch.
