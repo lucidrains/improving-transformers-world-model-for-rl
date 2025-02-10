@@ -1,11 +1,13 @@
 from math import ceil
 
 import torch
-from torch import nn
+from torch import nn, tensor
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
 
 from einops import repeat
+
+from vector_quantize_pytorch import VectorQuantize
 
 # flex attention
 # https://pytorch.org/blog/flexattention/
@@ -35,6 +37,25 @@ def nonflex_block_causal_mask(seq_len, block_size, device = None):
     causal_mask = torch.ones((blocks, blocks), device = device, dtype = torch.bool).tril()
     block_causal_mask = repeat(causal_mask, 'i j -> (i bsz1) (j bsz2)', bsz1 = block_size, bsz2 = block_size)
     return block_causal_mask
+
+# nearest-neighbor tokenizer
+
+class NNT(Module):
+    def __init__(
+        self,
+        dim,
+        distance_threshold,
+        max_codes = 100_000
+    ):
+        super().__init__()
+
+        self.register_buffer('num_codes', tensor(0))
+
+        codes = torch.zeros(max_codes, dim)
+        self.register_buffer('codes', codes) # ran into trouble in the past with dynamically sized buffers, just keep a static shape
+
+    def forward(self, x):
+        raise NotImplementedError
 
 # transformer
 
