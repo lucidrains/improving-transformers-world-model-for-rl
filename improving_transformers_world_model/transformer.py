@@ -52,7 +52,7 @@ def nonflex_block_causal_mask(seq_len, block_size, device = None):
     block_causal_mask = repeat(causal_mask, 'i j -> (i bsz1) (j bsz2)', bsz1 = block_size, bsz2 = block_size)
     return block_causal_mask[:seq_len, :seq_len]
 
-# nearest-neighbor tokenizer
+# patch nearest-neighbor tokenizer proposed in section 3.5
 
 class NearestNeighborTokenizer(Module):
     def __init__(
