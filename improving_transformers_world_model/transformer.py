@@ -40,7 +40,7 @@ def nonflex_block_causal_mask(seq_len, block_size, device = None):
 
 # nearest-neighbor tokenizer
 
-class NNT(Module):
+class NearestNeighborTokenizer(Module):
     def __init__(
         self,
         dim,
