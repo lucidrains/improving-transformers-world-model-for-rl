@@ -5,9 +5,23 @@ from torch import nn, tensor
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList
 
-from einops import repeat
+from einops import repeat, pack
 
 from vector_quantize_pytorch import VectorQuantize
+
+# helper functions
+
+def exists(v):
+    return v is not None
+
+def default(v, d):
+    return v if exists(v) else d
+
+def pack_one(t, pattern):
+    return pack([t], pattern)
+
+def is_empty(t):
+    return t.numel() == 0
 
 # flex attention
 # https://pytorch.org/blog/flexattention/
@@ -53,18 +67,40 @@ class NearestNeighborTokenizer(Module):
 
         self.distance_threshold = distance_threshold
 
-        self.register_buffer('num_codes', tensor(1))
-
         codes = torch.zeros(max_codes, dim)
         self.register_buffer('_codes', codes) # ran into trouble in the past with dynamically sized buffers, just keep a static shape
+
+        self.register_buffer('num_codes', tensor(0))
+        self.register_buffer('num_times_activated', torch.ones(max_codes))
 
     @property
     def codes(self):
         num_codes = self.num_codes.item()
         return self._codes[:num_codes]
 
+    def add_code_(self, code):
+        index = self.num_codes.item()
+        self._codes[index].copy_(code)
+        self.num_codes.add_(1)
+
     def add_codes_(self, codes):
-        raise NotImplementedError
+        codes, _ = pack_one(codes, '* d')
+
+        codes_added = 0
+
+        # naive approach, adding one code at a time until set of codes all have a neighbor
+
+        while not is_empty(codes):
+            first_code, codes = codes[0], codes[1:]
+
+            self.add_code_(first_code)
+
+            is_outside_dist_threshold = ~((torch.cdist(codes, self.codes) ** 2) <= self.distance_threshold).any(dim = -1)
+            codes = codes[is_outside_dist_threshold]
+
+            codes_added += 1
+
+        return codes_added
 
     def forward(
         self,
@@ -73,6 +109,7 @@ class NearestNeighborTokenizer(Module):
         num_codes, no_code_id, device = self.num_codes.item(), self.no_code_id, x.device
 
         if num_codes == 0:
+            self.add_codes_(x)
             return torch.full(x.shape[:-1], no_code_id, device = device)
 
         # euclidean distance
