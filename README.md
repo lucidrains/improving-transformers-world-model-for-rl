@@ -6,7 +6,7 @@
 
 Implementation of the new SOTA for model based RL, from the paper [Improving Transformer World Models for Data-Efficient RL](https://arxiv.org/abs/2502.01591), in Pytorch.
 
-They significantly outperformed DreamerV3 with a transformer world model and a less complicated setup, on Craftax (simplified Minecraft environment).
+They significantly outperformed DreamerV3 with a transformer world model and a less complicated setup, on Craftax (simplified Minecraft environment), as well as human experts.
 
 ## Citations
 
