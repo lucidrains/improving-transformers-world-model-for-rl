@@ -36,7 +36,7 @@ def nonflex_block_causal_mask(seq_len, block_size, device = None):
 
     causal_mask = torch.ones((blocks, blocks), device = device, dtype = torch.bool).tril()
     block_causal_mask = repeat(causal_mask, 'i j -> (i bsz1) (j bsz2)', bsz1 = block_size, bsz2 = block_size)
-    return block_causal_mask
+    return block_causal_mask[:seq_len, :seq_len]
 
 # nearest-neighbor tokenizer
 
