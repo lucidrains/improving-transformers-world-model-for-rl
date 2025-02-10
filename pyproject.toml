@@ -28,6 +28,7 @@ dependencies = [
     "einx>=0.3.0",
     "einops>=0.8.0",
     "hl-gauss-pytorch>=0.1.16",
+    "hyper-connections>=0.1.11",
     "vector-quantize-pytorch",
     "torch>=2.2",
 ]

@@ -9,6 +9,8 @@ from einops import repeat, pack
 
 from vector_quantize_pytorch import VectorQuantize
 
+from hyper_connections import get_init_and_expand_reduce_stream_functions
+
 # helper functions
 
 def exists(v):
