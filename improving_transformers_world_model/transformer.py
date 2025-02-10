@@ -45,17 +45,56 @@ class NearestNeighborTokenizer(Module):
         self,
         dim,
         distance_threshold,
-        max_codes = 100_000
+        max_codes = 100_000,
+        no_code_id = -1
     ):
         super().__init__()
+        self.no_code_id = no_code_id
 
-        self.register_buffer('num_codes', tensor(0))
+        self.distance_threshold = distance_threshold
+
+        self.register_buffer('num_codes', tensor(1))
 
         codes = torch.zeros(max_codes, dim)
-        self.register_buffer('codes', codes) # ran into trouble in the past with dynamically sized buffers, just keep a static shape
+        self.register_buffer('_codes', codes) # ran into trouble in the past with dynamically sized buffers, just keep a static shape
 
-    def forward(self, x):
+    @property
+    def codes(self):
+        num_codes = self.num_codes.item()
+        return self._codes[:num_codes]
+
+    def add_codes_(self, codes):
         raise NotImplementedError
+
+    def forward(
+        self,
+        x
+    ):
+        num_codes, no_code_id, device = self.num_codes.item(), self.no_code_id, x.device
+
+        if num_codes == 0:
+            return torch.full(x.shape[:-1], no_code_id, device = device)
+
+        # euclidean distance
+
+        distance_sq = torch.cdist(x, self.codes) ** 2
+
+        # within distance threshold set at init
+
+        within_dist_threshold = (distance_sq <= self.distance_threshold).any(dim = -1)
+
+        # if any observations are outside of distance threshold, need to set the new codes
+
+        if self.training and not within_dist_threshold.all():
+            new_codes = x[~within_dist_threshold]
+            self.add_codes_(new_codes)
+
+        # nearest neighbors by argmin - eq (1) in paper
+
+        nearest_neighbor_ids = distance_sq.argmin(dim = -1)
+        nearest_neighbor_ids = torch.where(within_dist_threshold, nearest_neighbor_ids, no_code_id)
+
+        return nearest_neighbor_ids
 
 # transformer
 
