@@ -1,0 +1,61 @@
+[project]
+name = "improving-transformers-world-model"
+version = "0.0.1"
+description = "Improving Transformers World Model for RL"
+authors = [
+    { name = "Phil Wang", email = "lucidrains@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">= 3.9"
+license = { file = "LICENSE" }
+keywords = [
+    'artificial intelligence',
+    'deep learning',
+    'transformer',
+    'attention mechanism',
+    'world model'
+]
+
+classifiers=[
+    'Development Status :: 4 - Beta',
+    'Intended Audience :: Developers',
+    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    'License :: OSI Approved :: MIT License',
+    'Programming Language :: Python :: 3.9',
+]
+
+dependencies = [
+    "einx>=0.3.0",
+    "einops>=0.8.0",
+    "hl-gauss-pytorch>=0.1.16",
+    "torch>=2.2",
+]
+
+[project.urls]
+Homepage = "https://pypi.org/project/improving-transformers-world-model-for-rl/"
+Repository = "https://github.com/lucidrains/improving-transformers-world-model-for-rl"
+
+[project.optional-dependencies]
+examples = []
+test = [
+    "pytest"
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "."
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.rye]
+managed = true
+dev-dependencies = []
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["improving_transformers_world_model"]
