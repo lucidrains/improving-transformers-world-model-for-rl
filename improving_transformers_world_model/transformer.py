@@ -14,6 +14,8 @@ from hyper_connections import get_init_and_expand_reduce_stream_functions
 
 from improving_transformers_world_model.distributed import all_gather_variable_dim
 
+from rotary_embedding_torch import RotaryEmbedding
+
 # helper functions
 
 def exists(v):
@@ -181,6 +183,10 @@ class BlockCausalAttention(Module):
         self.merge_heads = Rearrange('b h n d -> b n (h d)')
         self.to_out = Linear(dim_inner, dim, bias = False)
 
+        # rope
+
+        self.rotary_emb = RotaryEmbedding(dim_head)
+
         # value residual learning
 
         self.accept_value_residual = accept_value_residual
@@ -205,6 +211,10 @@ class BlockCausalAttention(Module):
         q, k, v = map(self.split_heads, qkv)
 
         orig_v = v
+
+        # rotary embed
+
+        q, k = self.rotary_emb.rotate_queries_with_cached_keys(q, k)
 
         # handle a recent advance, value residual
 

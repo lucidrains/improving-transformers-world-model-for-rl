@@ -29,8 +29,9 @@ dependencies = [
     "einops>=0.8.0",
     "hl-gauss-pytorch>=0.1.16",
     "hyper-connections>=0.1.11",
-    "vector-quantize-pytorch",
+    "rotary-embedding-torch>=0.8.6",
     "torch>=2.2",
+    "vector-quantize-pytorch",
 ]
 
 [project.urls]
