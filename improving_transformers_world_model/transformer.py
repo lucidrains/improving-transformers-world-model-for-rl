@@ -11,6 +11,8 @@ from vector_quantize_pytorch import VectorQuantize
 
 from hyper_connections import get_init_and_expand_reduce_stream_functions
 
+from improving_transformers_world_model.distributed import all_gather_variable_dim
+
 # helper functions
 
 def exists(v):
@@ -124,9 +126,17 @@ class NearestNeighborTokenizer(Module):
 
         # if any observations are outside of distance threshold, need to set the new codes
 
-        if self.training and not within_dist_threshold.all():
-            new_codes = x[~within_dist_threshold]
-            self.add_codes_(new_codes)
+        if self.training:
+            all_within_dist_threshold = within_dist_threshold.all()
+
+            all_within_dist_threshold, _ = all_gather_variable_dim(all_within_dist_threshold)
+
+            if all_within_dist_threshold.any():
+                new_codes = x[~within_dist_threshold]
+
+                new_codes, _ = all_gather_variable_dim(new_codes)
+
+                self.add_codes_(new_codes)
 
         # nearest neighbors by argmin - eq (1) in paper
 
