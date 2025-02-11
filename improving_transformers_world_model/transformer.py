@@ -1,10 +1,11 @@
 from math import ceil
 
 import torch
-from torch import nn, tensor
+from torch import nn, tensor, cdist
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 
+import einx
 from einops import repeat, pack, einsum
 from einops.layers.torch import Rearrange
 
@@ -112,6 +113,12 @@ class NearestNeighborTokenizer(Module):
 
         return codes_added
 
+    def codes_from_indices(
+        self,
+        indices
+    ):
+        return einx.get_at('[c] d, ... -> ... d', self._codes, indices)
+
     def forward(
         self,
         x
@@ -120,11 +127,11 @@ class NearestNeighborTokenizer(Module):
 
         if num_codes == 0:
             self.add_codes_(x)
-            return torch.full(x.shape[:-1], no_code_id, device = device)
+            return cdist(x, self.codes).argmin(dim = -1)
 
         # euclidean distance
 
-        distance_sq = torch.cdist(x, self.codes) ** 2
+        distance_sq = cdist(x, self.codes) ** 2
 
         # within distance threshold set at init
 
@@ -146,14 +153,18 @@ class NearestNeighborTokenizer(Module):
 
         all_within_dist_threshold, _ = all_gather_variable_dim(all_within_dist_threshold)
 
-        if not all_within_dist_threshold.all():
+        if all_within_dist_threshold.all():
             return nearest_neighbor_ids
 
         new_codes = x[~within_dist_threshold]
 
-        new_codes, _ = all_gather_variable_dim(new_codes)
+        all_new_codes, _ = all_gather_variable_dim(new_codes)
 
-        self.add_codes_(new_codes)
+        self.add_codes_(all_new_codes)
+
+        new_code_ids = cdist(new_codes, self.codes).argmin(dim = -1)
+
+        nearest_neighbor_ids.masked_fill_(~within_dist_threshold, new_code_ids)
 
         return nearest_neighbor_ids
 
