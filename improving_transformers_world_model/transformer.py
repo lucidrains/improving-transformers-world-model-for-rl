@@ -3,9 +3,10 @@ from math import ceil
 import torch
 from torch import nn, tensor
 import torch.nn.functional as F
-from torch.nn import Module, ModuleList
+from torch.nn import Module, ModuleList, Linear
 
-from einops import repeat, pack
+from einops import repeat, pack, einsum
+from einops.layers.torch import Rearrange
 
 from vector_quantize_pytorch import VectorQuantize
 
@@ -124,35 +125,124 @@ class NearestNeighborTokenizer(Module):
 
         within_dist_threshold = (distance_sq <= self.distance_threshold).any(dim = -1)
 
-        # if any observations are outside of distance threshold, need to set the new codes
-
-        if self.training:
-            all_within_dist_threshold = within_dist_threshold.all()
-
-            all_within_dist_threshold, _ = all_gather_variable_dim(all_within_dist_threshold)
-
-            if all_within_dist_threshold.any():
-                new_codes = x[~within_dist_threshold]
-
-                new_codes, _ = all_gather_variable_dim(new_codes)
-
-                self.add_codes_(new_codes)
-
         # nearest neighbors by argmin - eq (1) in paper
 
         nearest_neighbor_ids = distance_sq.argmin(dim = -1)
         nearest_neighbor_ids = torch.where(within_dist_threshold, nearest_neighbor_ids, no_code_id)
 
+        # early return if not training
+
+        if not self.training:
+            return nearest_neighbor_ids
+
+        # if any observations are outside of distance threshold, need to set the new codes
+
+        all_within_dist_threshold = within_dist_threshold.all()
+
+        all_within_dist_threshold, _ = all_gather_variable_dim(all_within_dist_threshold)
+
+        if not all_within_dist_threshold.all():
+            return nearest_neighbor_ids
+
+        new_codes = x[~within_dist_threshold]
+
+        new_codes, _ = all_gather_variable_dim(new_codes)
+
+        self.add_codes_(new_codes)
+
         return nearest_neighbor_ids
+
+# attention
+
+class BlockCausalAttention(Module):
+    def __init__(
+        self,
+        dim,
+        block_size,
+        heads = 8,
+        dim_head = 64,
+        accept_value_residual = False
+    ):
+        super().__init__()
+        self.norm = nn.RMSNorm(dim)
+
+        self.scale = dim_head ** -0.5
+
+        dim_inner = dim_head * heads
+
+        self.block_size = block_size
+
+        self.to_qkv = Linear(dim, dim_inner * 3, bias = False)
+        self.split_heads = Rearrange('b n (h d) -> (b h) n d')
+
+        self.merge_heads = Rearrange('b h n d -> b n (h d)')
+        self.to_out = Linear(dim_inner, dim, bias = False)
+
+        # value residual learning
+
+        self.accept_value_residual = accept_value_residual
+
+        self.to_value_residual_mix = nn.Sequential(
+            Linear(dim, heads),
+            Rearrange('b n h -> b h n 1'),
+            nn.Sigmoid()
+        )
+
+    def forward(
+        self,
+        x,
+        value_residual = None,
+        flex_attn_block_mask = None
+    ):
+        x = self.norm(x)
+
+        seq_len, device = x.shape[1], x.device
+
+        qkv = self.to_qkv(x).chunk(3, dim = 1)
+        q, k, v = map(self.split_heads, qkv)
+
+        # handle a recent advance, value residual
+
+        assert xnor(exists(value_residual), self.accept_value_residual)
+
+        if exists(value_residual):
+            value_residual_mix = self.to_value_residual_mix(x)
+            v = v.lerp(value_residual, value_residual_mix)
+
+        if exists(flex_attn_mask):
+            out = flex_attention(q, k, v, block_mask = flex_attn_block_mask)
+        else:
+            # block causal mask
+
+            block_causal_mask = nonflex_block_causal_mask(seq_len, self.block_size, device = device)
+
+            q = q * self.scale
+            sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
+
+            sim = sim.masked_fill(~block_causal_mask, -torch.finfo(sim.dtype).max)
+
+            attn = sim.softmax(dim = -1)
+
+            out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
+
+        # merge heads and combine out
+
+        out = self.merge_heads(out)
+        return self.to_out(out)
 
 # transformer
 
 class BlockCausalTransformer(Module):
-    def __init__(self):
+    def __init__(
+        self
+    ):
         super().__init__()
 
     def sample(self):
         raise NotImplementedError
 
-    def forward(self, x):
+    def forward(
+        self,
+        x
+    ):
         raise NotImplementedError
