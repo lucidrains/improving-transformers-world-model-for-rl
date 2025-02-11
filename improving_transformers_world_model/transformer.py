@@ -230,13 +230,68 @@ class BlockCausalAttention(Module):
         out = self.merge_heads(out)
         return self.to_out(out)
 
+# feedforward, swi glu variant from Shazeer et al.
+
+class SwiGLUFeedForward(Module):
+    def __init__(
+        self,
+        dim,
+        expand_factor = 4.
+    ):
+        super().__init__()
+        self.norm = nn.RMSNorm(dim)
+
+        dim_hidden = int(dim * expand_factor * 2 / 3)
+        self.proj_in = Linear(dim, dim_hidden * 2)
+        self.proj_out = Linear(dim_hidden, dim)
+
+    def forward(self, x):
+        x = self.norm(x)
+
+        x, gates = self.proj_in(x).chunk(2, dim = -1)
+        x = x * F.gelu(gate)
+
+        return self.proj_out(x)
+
 # transformer
 
 class BlockCausalTransformer(Module):
     def __init__(
-        self
+        self,
+        dim,
+        *,
+        depth,
+        block_size,
+        dim_head = 64,
+        heads = 8,
+        ff_expand_factor = 4.,
+        num_residual_streams = 4,
+        use_flex_attn = False
     ):
         super().__init__()
+        layers = []
+
+        assert not (use_flex_attn and not exists(flex_attention))
+        self.use_flex_attn = use_flex_attn
+
+        self.block_size = block_size
+
+        # hyper connections
+
+        init_hyper_conn, self.expand_streams, self.reduce_streams = get_init_and_expand_reduce_stream_functions(num_residual_streams, dim = dim, disable = num_residual_streams == 1)
+
+        # layers
+
+        for _ in range(depth):
+            attn = BlockCausalAttention(dim = dim, dim_head = dim_head, heads = heads, block_size = block_size)
+            ff = SwiGLUFeedForward(dim = dim, expand_factor = ff_expand_factor)
+
+            layers.append(ModuleList([
+                init_hyper_conn(branch = attn),
+                init_hyper_conn(branch = ff)
+            ]))
+
+        self.layers = ModuleList(layers)
 
     def sample(self):
         raise NotImplementedError
@@ -245,4 +300,34 @@ class BlockCausalTransformer(Module):
         self,
         x
     ):
-        raise NotImplementedError
+        seq_len = x.shape[1]
+
+        # hyper connection residual streams
+
+        x = self.expand_streams(x)
+
+        # value residuals
+
+        first_attn_values = None
+
+        # maybe flex attention
+
+        flex_attn_block_mask = None
+
+        if self.use_flex_attn:
+            flex_attn_block_mask = create_block_causal_mask(seq_len, self.block_size)
+
+        # layers of attention and feedforward
+
+        for attn, ff in self.layers:
+            x, attn_values = attn(x, value_residual = first_values, flex_attn_block_mask = flex_attn_block_mask)
+
+            first_attn_values = default(first_attn_values, attn_values)
+
+            x = ff(x)
+
+        # reduce residual streams
+
+        x = self.reduce_streams(x)
+
+        return x
