@@ -22,6 +22,9 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+def xnor(x, y):
+    return not (x ^ y)
+
 def pack_one(t, pattern):
     return pack([t], pattern)
 
@@ -173,7 +176,7 @@ class BlockCausalAttention(Module):
         self.block_size = block_size
 
         self.to_qkv = Linear(dim, dim_inner * 3, bias = False)
-        self.split_heads = Rearrange('b n (h d) -> (b h) n d')
+        self.split_heads = Rearrange('b n (h d) -> b h n d', h = heads)
 
         self.merge_heads = Rearrange('b h n d -> b n (h d)')
         self.to_out = Linear(dim_inner, dim, bias = False)
@@ -198,8 +201,10 @@ class BlockCausalAttention(Module):
 
         seq_len, device = x.shape[1], x.device
 
-        qkv = self.to_qkv(x).chunk(3, dim = 1)
+        qkv = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(self.split_heads, qkv)
+
+        orig_v = v
 
         # handle a recent advance, value residual
 
@@ -209,7 +214,7 @@ class BlockCausalAttention(Module):
             value_residual_mix = self.to_value_residual_mix(x)
             v = v.lerp(value_residual, value_residual_mix)
 
-        if exists(flex_attn_mask):
+        if exists(flex_attn_block_mask):
             out = flex_attention(q, k, v, block_mask = flex_attn_block_mask)
         else:
             # block causal mask
@@ -228,7 +233,8 @@ class BlockCausalAttention(Module):
         # merge heads and combine out
 
         out = self.merge_heads(out)
-        return self.to_out(out)
+
+        return self.to_out(out), orig_v
 
 # feedforward, swi glu variant from Shazeer et al.
 
@@ -249,7 +255,7 @@ class SwiGLUFeedForward(Module):
         x = self.norm(x)
 
         x, gates = self.proj_in(x).chunk(2, dim = -1)
-        x = x * F.gelu(gate)
+        x = x * F.gelu(gates)
 
         return self.proj_out(x)
 
@@ -282,8 +288,10 @@ class BlockCausalTransformer(Module):
 
         # layers
 
-        for _ in range(depth):
-            attn = BlockCausalAttention(dim = dim, dim_head = dim_head, heads = heads, block_size = block_size)
+        for i in range(depth):
+            is_first = i == 0
+
+            attn = BlockCausalAttention(dim = dim, dim_head = dim_head, heads = heads, block_size = block_size, accept_value_residual = not is_first)
             ff = SwiGLUFeedForward(dim = dim, expand_factor = ff_expand_factor)
 
             layers.append(ModuleList([
@@ -320,7 +328,7 @@ class BlockCausalTransformer(Module):
         # layers of attention and feedforward
 
         for attn, ff in self.layers:
-            x, attn_values = attn(x, value_residual = first_values, flex_attn_block_mask = flex_attn_block_mask)
+            x, attn_values = attn(x, value_residual = first_attn_values, flex_attn_block_mask = flex_attn_block_mask)
 
             first_attn_values = default(first_attn_values, attn_values)
 
