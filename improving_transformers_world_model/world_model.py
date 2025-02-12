@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 
 import einx
-from einops import repeat, pack, unpack, einsum
+from einops import rearrange, repeat, pack, unpack, einsum
 from einops.layers.torch import Rearrange
 
 from vector_quantize_pytorch import VectorQuantize
@@ -89,6 +89,7 @@ class NearestNeighborTokenizer(Module):
         no_code_id = -1
     ):
         super().__init__()
+        self.max_codes = max_codes
         self.no_code_id = no_code_id
 
         self.distance_threshold = distance_threshold
@@ -138,11 +139,15 @@ class NearestNeighborTokenizer(Module):
         self,
         x
     ):
+
+        x, inverse_pack_one = pack_one_with_inverse(x, 'b * d')
+
         num_codes, no_code_id, device = self.num_codes.item(), self.no_code_id, x.device
 
         if num_codes == 0:
             self.add_codes_(x)
-            return cdist(x, self.codes).argmin(dim = -1)
+            ids = cdist(x, self.codes).argmin(dim = -1)
+            return inverse_pack_one(ids, 'b *')
 
         # euclidean distance
 
@@ -160,7 +165,7 @@ class NearestNeighborTokenizer(Module):
         # early return if not training
 
         if not self.training:
-            return nearest_neighbor_ids
+            return inverse_pack_one(nearest_neighbor_ids, 'b *')
 
         # if any observations are outside of distance threshold, need to set the new codes
 
@@ -169,7 +174,7 @@ class NearestNeighborTokenizer(Module):
         all_within_dist_threshold, _ = all_gather_variable_dim(all_within_dist_threshold)
 
         if all_within_dist_threshold.all():
-            return nearest_neighbor_ids
+            return inverse_pack_one(nearest_neighbor_ids)
 
         new_codes = x[~within_dist_threshold]
 
@@ -181,7 +186,7 @@ class NearestNeighborTokenizer(Module):
 
         nearest_neighbor_ids.masked_fill_(~within_dist_threshold, new_code_ids)
 
-        return nearest_neighbor_ids
+        return inverse_pack_one(nearest_neighbor_ids, 'b *')
 
 # attention
 
@@ -421,28 +426,42 @@ class WorldModel(Module):
 
         model_dim = transformer.dim
         self.proj_in = nn.Linear(patch_size_with_channel, model_dim)
-        self.proj_out = nn.Linear(model_dim, patch_size_with_channel)
+        self.to_pred = nn.Linear(model_dim, tokenizer.max_codes)
+
+    def sample(self, prompt):
+        raise NotImplementedError
 
     def forward(
         self,
-        state
+        state,
+        return_loss = True
     ):
         tokens = self.to_tokens(state)
 
-        tokens, inverse_pack_space_time = pack_one_with_inverse(tokens, 'b * d')
-
         token_ids = self.tokenizer(tokens)
 
-        codes = self.tokenizer.codes_from_indices(token_ids)
+        if return_loss:
+            token_ids, labels = token_ids[:, :-1], token_ids[:, 1:]
 
-        codes = self.proj_in(codes)
+        tokens = self.tokenizer.codes_from_indices(token_ids)
 
-        embeds = self.transformer(codes)
+        tokens, inverse_pack_space_time = pack_one_with_inverse(tokens, 'b * d')
 
-        attended_tokens = self.proj_out(embeds)
+        tokens = self.proj_in(tokens)
 
-        attended_with_space_time = inverse_pack_space_time(attended_tokens)
+        embeds = self.transformer(tokens)
 
-        decoded_state = self.to_decoded_state(attended_with_space_time)
+        logits = self.to_pred(embeds)
 
-        return decoded_state
+        logits = inverse_pack_space_time(logits)
+
+        if not return_loss:
+            return logits
+
+        loss = F.cross_entropy(
+            rearrange(logits, 'b ... l -> b l (...)'),
+            rearrange(labels, 'b ... -> b (...)'),
+            ignore_index = -1
+        )
+
+        return loss
