@@ -45,7 +45,9 @@ loss.backward()
 
 # dream up a trajectory to be mixed with real for training PPO
 
-imagined_trajectories = world_model.sample()
+prompts = state[:, :2] # prompt frames
+
+imagined_trajectories = world_model.sample(prompts)
 
 ```
 

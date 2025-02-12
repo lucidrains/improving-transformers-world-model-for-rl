@@ -137,8 +137,11 @@ class NearestNeighborTokenizer(Module):
 
     def forward(
         self,
-        x
+        x,
+        ignore_dist_threshold = None
     ):
+
+        ignore_dist_threshold = default(ignore_dist_threshold, not self.training)
 
         x, inverse_pack_one = pack_one_with_inverse(x, 'b * d')
 
@@ -152,6 +155,11 @@ class NearestNeighborTokenizer(Module):
         # euclidean distance
 
         distance_sq = cdist(x, self.codes) ** 2
+
+        # early return with closest code if evaluating, ignoring the distance threshold
+
+        if ignore_dist_threshold:
+            return distance_sq.argmin(dim = -1)
 
         # within distance threshold set at init
 
