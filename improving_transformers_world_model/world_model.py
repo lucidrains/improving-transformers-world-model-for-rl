@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 
 import einx
-from einops import repeat, pack, einsum
+from einops import repeat, pack, unpack, einsum
 from einops.layers.torch import Rearrange
 
 from vector_quantize_pytorch import VectorQuantize
@@ -27,11 +27,24 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+def divisible_by(num, den):
+    return (num % den) == 0
+
 def xnor(x, y):
     return not (x ^ y)
 
 def pack_one(t, pattern):
     return pack([t], pattern)
+
+def pack_one_with_inverse(t, pattern):
+    packed, ps = pack([t], pattern)
+
+    def inverse(output, inv_pattern = None):
+        inv_pattern = default(inv_pattern, pattern)
+        unpacked, = unpack(output, ps, inv_pattern)
+        return unpacked
+
+    return packed, inverse
 
 def is_empty(t):
     return t.numel() == 0
@@ -298,6 +311,8 @@ class BlockCausalTransformer(Module):
         use_flex_attn = False
     ):
         super().__init__()
+        self.dim = dim
+
         layers = []
 
         assert not (use_flex_attn and not exists(flex_attention))
@@ -333,6 +348,7 @@ class BlockCausalTransformer(Module):
         self,
         tokens
     ):
+
         seq_len = tokens.shape[1]
 
         # hyper connection residual streams
@@ -373,18 +389,62 @@ class BlockCausalTransformer(Module):
 class WorldModel(Module):
     def __init__(
         self,
-        dim,
-        transformer: BlockCausalTransformer,
-        tokenizer: NearestNeighborTokenizer | Module,
+        image_size,
+        patch_size,
+        channels,
+        tokenizer: NearestNeighborTokenizer | Module | dict = dict(),
+        transformer: BlockCausalTransformer | dict = dict(),
     ):
         super().__init__()
 
+        assert divisible_by(image_size, patch_size)
+
+        self.to_tokens = Rearrange('b c t (h p1) (w p2) -> b t h w (p1 p2 c)', p1 = patch_size, p2 = patch_size)
+        self.to_decoded_state = Rearrange('b t h w (p1 p2 c) -> b c t (h p1) (w p2)', p1 = patch_size, p2 = patch_size)
+
+        patch_dim = (image_size // patch_size)
+        patch_size_with_channel = (patch_size ** 2) * channels
+        patches_per_image = patch_dim ** 2
+
+        if isinstance(transformer, dict):
+            transformer = BlockCausalAttention(**transformer)
+
         self.transformer = transformer
+        assert transformer.block_size == patches_per_image, f'transformer block size is recommended to be the number of patches per game image, which is {patches_per_image}'
+
+        if isinstance(tokenizer, dict):
+            tokenizer = NearestNeighborTokenizer(**tokenizer)
+
         self.tokenizer = tokenizer
+
+        # projecting in and out from patches to model dimensions
+
+        model_dim = transformer.dim
+        self.proj_in = nn.Linear(patch_size_with_channel, model_dim)
+        self.proj_out = nn.Linear(model_dim, patch_size_with_channel)
 
     def forward(
         self,
         state
     ):
+        times = state.shape[2]
 
-        return state
+        tokens = self.to_tokens(state)
+
+        tokens, inverse_pack_space_time = pack_one_with_inverse(tokens, 'b * d')
+
+        token_ids = self.tokenizer(tokens)
+
+        codes = self.tokenizer.codes_from_indices(token_ids)
+
+        codes = self.proj_in(codes)
+
+        embeds = self.transformer(codes)
+
+        attended_tokens = self.proj_out(embeds)
+
+        attended_with_space_time = inverse_pack_space_time(attended_tokens)
+
+        decoded_state = self.to_decoded_state(attended_with_space_time)
+
+        return decoded_state

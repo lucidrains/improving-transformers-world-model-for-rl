@@ -8,6 +8,41 @@ Implementation of the new SOTA for model based RL, from the paper [Improving Tra
 
 They significantly outperformed DreamerV3 (as well as human experts) with a transformer world model and a less complicated setup, on Craftax (simplified Minecraft environment)
 
+## Usage
+
+```python
+import torch
+
+from improving_transformers_world_model import (
+    WorldModel
+)
+
+world_model = WorldModel(
+    image_size = 63,
+    patch_size = 7,
+    channels = 3,
+    transformer = dict(
+        dim = 512,
+        depth = 4,
+        block_size = 81
+    ),
+    tokenizer = dict(
+        dim = 7 * 7 * 3,
+        distance_threshold = 0.5
+    )
+)
+
+state = torch.randn(2, 3, 20, 63, 63) # batch, channels, time, height, width - craftax is 3 channels 63x63, and they used rollout of 20 frames. block size is presumably each image
+
+loss = world_model(state)
+loss.backward()
+
+# dream up a trajectory to be mixed with real for training PPO
+
+imagined_trajectories = world_model.sample()
+
+```
+
 ## Citations
 
 ```bibtex
