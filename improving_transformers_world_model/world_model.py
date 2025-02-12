@@ -354,9 +354,6 @@ class BlockCausalTransformer(Module):
 
         self.norm = nn.RMSNorm(dim)
 
-    def sample(self):
-        raise NotImplementedError
-
     def forward(
         self,
         tokens
@@ -436,8 +433,17 @@ class WorldModel(Module):
         self.proj_in = nn.Linear(patch_size_with_channel, model_dim)
         self.to_pred = nn.Linear(model_dim, tokenizer.max_codes)
 
-    def sample(self, prompt):
+    @torch.inference_mode()
+    def sample(
+        self,
+        prompt
+    ):
+        was_training = self.training
+        self.eval()
+
         raise NotImplementedError
+
+        self.train(was_training)
 
     def forward(
         self,
