@@ -8,6 +8,12 @@ Implementation of the new SOTA for model based RL, from the paper [Improving Tra
 
 They significantly outperformed DreamerV3 (as well as human experts) with a transformer world model and a less complicated setup, on Craftax (simplified Minecraft environment)
 
+## Install
+
+```bash
+$ pip install improving-transformers-world-model
+```
+
 ## Usage
 
 ```python
