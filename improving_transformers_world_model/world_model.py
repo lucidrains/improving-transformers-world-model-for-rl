@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from math import ceil
 
 import torch
@@ -364,3 +366,25 @@ class BlockCausalTransformer(Module):
         embed = self.norm(tokens)
 
         return embed
+
+# world model
+# their proposed successful world model is a memorizing nearest neighbor tokenizer + block causal transformer
+
+class WorldModel(Module):
+    def __init__(
+        self,
+        dim,
+        transformer: BlockCausalTransformer,
+        tokenizer: NearestNeighborTokenizer | Module,
+    ):
+        super().__init__()
+
+        self.transformer = transformer
+        self.tokenizer = tokenizer
+
+    def forward(
+        self,
+        state
+    ):
+
+        return state
