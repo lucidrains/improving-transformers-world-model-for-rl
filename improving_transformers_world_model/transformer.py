@@ -322,18 +322,20 @@ class BlockCausalTransformer(Module):
 
         self.layers = ModuleList(layers)
 
+        self.norm = nn.RMSNorm(dim)
+
     def sample(self):
         raise NotImplementedError
 
     def forward(
         self,
-        x
+        tokens
     ):
-        seq_len = x.shape[1]
+        seq_len = tokens.shape[1]
 
         # hyper connection residual streams
 
-        x = self.expand_streams(x)
+        tokens = self.expand_streams(tokens)
 
         # value residuals
 
@@ -349,14 +351,16 @@ class BlockCausalTransformer(Module):
         # layers of attention and feedforward
 
         for attn, ff in self.layers:
-            x, attn_values = attn(x, value_residual = first_attn_values, flex_attn_block_mask = flex_attn_block_mask)
+            tokens, attn_values = attn(tokens, value_residual = first_attn_values, flex_attn_block_mask = flex_attn_block_mask)
 
             first_attn_values = default(first_attn_values, attn_values)
 
-            x = ff(x)
+            tokens = ff(tokens)
 
         # reduce residual streams
 
-        x = self.reduce_streams(x)
+        tokens = self.reduce_streams(tokens)
 
-        return x
+        embed = self.norm(tokens)
+
+        return embed
