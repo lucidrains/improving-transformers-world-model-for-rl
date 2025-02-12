@@ -427,8 +427,6 @@ class WorldModel(Module):
         self,
         state
     ):
-        times = state.shape[2]
-
         tokens = self.to_tokens(state)
 
         tokens, inverse_pack_space_time = pack_one_with_inverse(tokens, 'b * d')
