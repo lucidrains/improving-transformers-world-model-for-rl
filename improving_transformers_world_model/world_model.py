@@ -101,6 +101,10 @@ class NearestNeighborTokenizer(Module):
         self.register_buffer('num_times_activated', torch.ones(max_codes))
 
     @property
+    def is_at_max_codes(self):
+        return self.num_codes.item() == self.max_codes
+
+    @property
     def codes(self):
         num_codes = self.num_codes.item()
         return self._codes[:num_codes]
@@ -117,7 +121,7 @@ class NearestNeighborTokenizer(Module):
 
         # naive approach, adding one code at a time until set of codes all have a neighbor
 
-        while not is_empty(codes):
+        while not is_empty(codes) and not self.is_at_max_codes:
             first_code, codes = codes[0], codes[1:]
 
             self.add_code_(first_code)
@@ -141,7 +145,7 @@ class NearestNeighborTokenizer(Module):
         ignore_dist_threshold = None
     ):
 
-        ignore_dist_threshold = default(ignore_dist_threshold, not self.training)
+        ignore_dist_threshold = default(ignore_dist_threshold, not self.training or self.is_at_max_codes)
 
         x, inverse_pack_one = pack_one_with_inverse(x, 'b * d')
 
