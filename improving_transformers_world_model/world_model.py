@@ -3,7 +3,7 @@ from __future__ import annotations
 from math import ceil
 
 import torch
-from torch import nn, tensor, cdist
+from torch import nn, tensor, cdist, cat
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 
@@ -48,6 +48,27 @@ def pack_one_with_inverse(t, pattern):
 
 def is_empty(t):
     return t.numel() == 0
+
+# sampling related
+
+def log(t, eps = 1e-20):
+    return torch.log(t.clamp(min = eps))
+
+def gumbel_noise(t):
+    noise = torch.zeros_like(t).uniform_(0, 1)
+    return -log(-log(noise))
+
+def gumbel_sample(t, temperature = 1., dim = -1, keepdim = True):
+    return ((t / max(temperature, 1e-10)) + gumbel_noise(t)).argmax(dim = dim, keepdim = keepdim)
+
+# min_p
+# https://arxiv.org/abs/2407.01082
+
+def min_p_filter(logits, min_p = 0.1):
+    probs = logits.softmax(dim = -1)
+    max_probs = probs.amax(dim = -1, keepdim = True)
+    limit = min_p * max_probs
+    return torch.where(probs < limit, float('-inf'), logits)
 
 # flex attention
 # https://pytorch.org/blog/flexattention/
@@ -163,7 +184,8 @@ class NearestNeighborTokenizer(Module):
         # early return with closest code if evaluating, ignoring the distance threshold
 
         if ignore_dist_threshold:
-            return distance_sq.argmin(dim = -1)
+            ids = distance_sq.argmin(dim = -1)
+            return inverse_pack_one(ids, 'b *')
 
         # within distance threshold set at init
 
@@ -186,7 +208,7 @@ class NearestNeighborTokenizer(Module):
         all_within_dist_threshold, _ = all_gather_variable_dim(all_within_dist_threshold)
 
         if all_within_dist_threshold.all():
-            return inverse_pack_one(nearest_neighbor_ids)
+            return inverse_pack_one(nearest_neighbor_ids, 'b *')
 
         new_codes = x[~within_dist_threshold]
 
@@ -413,15 +435,15 @@ class WorldModel(Module):
 
         assert divisible_by(image_size, patch_size)
 
-        self.to_tokens = Rearrange('b c t (h p1) (w p2) -> b t h w (p1 p2 c)', p1 = patch_size, p2 = patch_size)
-        self.to_decoded_state = Rearrange('b t h w (p1 p2 c) -> b c t (h p1) (w p2)', p1 = patch_size, p2 = patch_size)
+        self.state_to_patches = Rearrange('b c t (h p1) (w p2) -> b t h w (p1 p2 c)', p1 = patch_size, p2 = patch_size)
+        self.patches_to_state = Rearrange('b t h w (p1 p2 c) -> b c t (h p1) (w p2)', p1 = patch_size, p2 = patch_size)
 
         patch_dim = (image_size // patch_size)
         patch_size_with_channel = (patch_size ** 2) * channels
         patches_per_image = patch_dim ** 2
 
         if isinstance(transformer, dict):
-            transformer = BlockCausalAttention(**transformer)
+            transformer = BlockCausalTransformer(**transformer)
 
         self.transformer = transformer
         assert transformer.block_size == patches_per_image, f'transformer block size is recommended to be the number of patches per game image, which is {patches_per_image}'
@@ -440,23 +462,55 @@ class WorldModel(Module):
     @torch.inference_mode()
     def sample(
         self,
-        prompt
+        prompt,
+        time_steps,
+        filter_fn = min_p_filter,
+        filter_kwargs: dict = dict(),
+        temperature = 1.5
     ):
         was_training = self.training
+
         self.eval()
 
-        raise NotImplementedError
+        prompt_time = prompt.shape[-3]
+
+        assert prompt_time <= time_steps, f'nothing to sample, as prompt already is greater or equal to desired number of time steps'
+
+        patches = self.state_to_patches(prompt)
+
+        ids = self.tokenizer(patches)
+
+        for _ in range(time_steps - prompt_time):
+            logits = self.forward(
+                ids,
+                return_loss = False
+            )
+
+            logits = logits[:, -1:] # last timestep logits
+
+            logits = filter_fn(logits, **filter_kwargs)
+            sampled = gumbel_sample(logits, temperature = temperature, dim = -1, keepdim = False)
+
+            ids = cat((ids, sampled), dim = 1)
 
         self.train(was_training)
 
+        nearest_neighbor_codes = self.tokenizer.codes_from_indices(ids)
+
+        return self.patches_to_state(nearest_neighbor_codes)
+
     def forward(
         self,
-        state,
+        state_or_token_ids,
         return_loss = True
     ):
-        tokens = self.to_tokens(state)
 
-        token_ids = self.tokenizer(tokens)
+        if state_or_token_ids.dtype  == torch.float:
+            patches = self.state_to_patches(state_or_token_ids)
+
+            token_ids = self.tokenizer(patches)
+        else:
+            token_ids = state_or_token_ids
 
         if return_loss:
             token_ids, labels = token_ids[:, :-1], token_ids[:, 1:]
