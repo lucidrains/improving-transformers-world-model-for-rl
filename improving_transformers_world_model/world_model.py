@@ -428,6 +428,7 @@ class WorldModel(Module):
         image_size,
         patch_size,
         channels,
+        transformer_use_token_embed = True,
         tokenizer: NearestNeighborTokenizer | Module | dict = dict(),
         transformer: BlockCausalTransformer | dict = dict(),
     ):
@@ -452,6 +453,8 @@ class WorldModel(Module):
             tokenizer = NearestNeighborTokenizer(**tokenizer)
 
         self.tokenizer = tokenizer
+
+        self.token_embed = nn.Embedding(tokenizer.max_codes, transformer.dim) if transformer_use_token_embed else None
 
         # projecting in and out from patches to model dimensions
 
@@ -515,11 +518,17 @@ class WorldModel(Module):
         if return_loss:
             token_ids, labels = token_ids[:, :-1], token_ids[:, 1:]
 
-        tokens = self.tokenizer.codes_from_indices(token_ids)
+        # either use own learned token embeddings
+        # or project the codes (which are just the nearest neighbor memorized patch) and project
+        # todo: maybe allow for a bit of both with learned mix
+
+        if exists(self.token_embed):
+            tokens = self.token_embed(token_ids)
+        else:
+            tokens = self.tokenizer.codes_from_indices(token_ids)
+            tokens = self.proj_in(tokens)
 
         tokens, inverse_pack_space_time = pack_one_with_inverse(tokens, 'b * d')
-
-        tokens = self.proj_in(tokens)
 
         embeds = self.transformer(tokens)
 
