@@ -469,7 +469,8 @@ class WorldModel(Module):
         time_steps,
         filter_fn = min_p_filter,
         filter_kwargs: dict = dict(),
-        temperature = 1.5
+        temperature = 1.5,
+        return_token_ids = False
     ):
         was_training = self.training
 
@@ -497,6 +498,9 @@ class WorldModel(Module):
             ids = cat((ids, sampled), dim = 1)
 
         self.train(was_training)
+
+        if return_token_ids:
+            return ids
 
         nearest_neighbor_codes = self.tokenizer.codes_from_indices(ids)
 
