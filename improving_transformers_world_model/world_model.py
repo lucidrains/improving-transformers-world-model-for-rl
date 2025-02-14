@@ -17,6 +17,12 @@ from hyper_connections import get_init_and_expand_reduce_stream_functions
 
 from improving_transformers_world_model.distributed import all_gather_variable_dim
 
+from improving_transformers_world_model.tensor_typing import (
+    Float,
+    Int,
+    Bool
+)
+
 from hl_gauss_pytorch import HLGaussLoss
 
 from rotary_embedding_torch import RotaryEmbedding
