@@ -7,15 +7,19 @@ from torch import nn, tensor, cdist, cat
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 
-import einx
-from einops import rearrange, repeat, pack, unpack, einsum
-from einops.layers.torch import Rearrange
-
 from vector_quantize_pytorch import VectorQuantize
 
 from hyper_connections import get_init_and_expand_reduce_stream_functions
 
 from improving_transformers_world_model.distributed import all_gather_variable_dim
+
+from hl_gauss_pytorch import HLGaussLoss
+
+from rotary_embedding_torch import RotaryEmbedding
+
+import einx
+from einops import rearrange, repeat, pack, unpack, einsum
+from einops.layers.torch import Rearrange
 
 from improving_transformers_world_model.tensor_typing import (
     Float,
@@ -23,9 +27,17 @@ from improving_transformers_world_model.tensor_typing import (
     Bool
 )
 
-from hl_gauss_pytorch import HLGaussLoss
+# ein notation
 
-from rotary_embedding_torch import RotaryEmbedding
+# b - batch
+# c - channels of game video
+# t - time steps
+# h - height
+# w - width
+# n - sequence (flattened spacetime)
+# h - attention heads
+# na - number of actions
+# l - logits / prediction bins
 
 # helper functions
 
@@ -507,7 +519,7 @@ class WorldModel(Module):
     @torch.inference_mode()
     def sample(
         self,
-        prompt,
+        prompt: Float['b c t h w'],
         time_steps,
         filter_fn = min_p_filter,
         filter_kwargs: dict = dict(),
@@ -550,9 +562,9 @@ class WorldModel(Module):
 
     def forward(
         self,
-        state_or_token_ids,
-        rewards = None,
-        actions = None,
+        state_or_token_ids: Float['b c t h w'] | Int['b t h w'],
+        rewards: Float['b t'] | None = None,
+        actions: Int['b t na'] | None = None,
         return_loss = True,
         return_loss_breakdown = False
     ):
