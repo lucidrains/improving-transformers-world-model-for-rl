@@ -44,8 +44,12 @@ from improving_transformers_world_model.tensor_typing import (
 def exists(v):
     return v is not None
 
-def default(v, d):
-    return v if exists(v) else d
+def default(*args):
+    for arg in args:
+        if exists(arg):
+            return arg
+
+    return None
 
 def divisible_by(num, den):
     return (num % den) == 0
@@ -56,12 +60,11 @@ def xnor(x, y):
 def pack_one(t, pattern):
     return pack([t], pattern)
 
-def pack_one_with_inverse(t, pattern):
+def pack_one_with_inverse(t, pattern, inv_pattern = None):
     packed, ps = pack([t], pattern)
 
-    def inverse(output, inv_pattern = None):
-        inv_pattern = default(inv_pattern, pattern)
-        unpacked, = unpack(output, ps, inv_pattern)
+    def inverse(output, override_pattern = None):
+        unpacked, = unpack(output, ps, default(override_pattern, inv_pattern, pattern))
         return unpacked
 
     return packed, inverse
@@ -150,12 +153,18 @@ class NearestNeighborTokenizer(Module):
         num_codes = self.num_codes.item()
         return self._codes[:num_codes]
 
-    def add_code_(self, code):
+    def add_code_(
+        self,
+        code: Float['d']
+    ):
         index = self.num_codes.item()
         self._codes[index].copy_(code)
         self.num_codes.add_(1)
 
-    def add_codes_(self, codes):
+    def add_codes_(
+        self,
+        codes: Float['... d']
+    ):
         codes, _ = pack_one(codes, '* d')
 
         codes_added = 0
@@ -176,26 +185,27 @@ class NearestNeighborTokenizer(Module):
 
     def codes_from_indices(
         self,
-        indices
+        indices: Int['b ...']
     ):
         return einx.get_at('[c] d, ... -> ... d', self._codes, indices)
 
     def forward(
         self,
-        x,
-        ignore_dist_threshold = None
+        x: Float['b ... d'],
+        ignore_dist_threshold = None,
+        return_distance = False
     ):
 
         ignore_dist_threshold = default(ignore_dist_threshold, not self.training or self.is_at_max_codes)
 
-        x, inverse_pack_one = pack_one_with_inverse(x, 'b * d')
+        x, inverse_pack_one = pack_one_with_inverse(x, 'b * d', 'b *')
 
         num_codes, no_code_id, device = self.num_codes.item(), self.no_code_id, x.device
 
         if num_codes == 0:
             self.add_codes_(x)
             ids = cdist(x, self.codes).argmin(dim = -1)
-            return inverse_pack_one(ids, 'b *')
+            return inverse_pack_one(ids)
 
         # euclidean distance
 
@@ -205,7 +215,7 @@ class NearestNeighborTokenizer(Module):
 
         if ignore_dist_threshold:
             ids = distance_sq.argmin(dim = -1)
-            return inverse_pack_one(ids, 'b *')
+            return inverse_pack_one(ids)
 
         # within distance threshold set at init
 
@@ -219,7 +229,7 @@ class NearestNeighborTokenizer(Module):
         # early return if not training
 
         if not self.training:
-            return inverse_pack_one(nearest_neighbor_ids, 'b *')
+            return inverse_pack_one(nearest_neighbor_ids)
 
         # if any observations are outside of distance threshold, need to set the new codes
 
@@ -228,7 +238,7 @@ class NearestNeighborTokenizer(Module):
         all_within_dist_threshold, _ = all_gather_variable_dim(all_within_dist_threshold)
 
         if all_within_dist_threshold.all():
-            return inverse_pack_one(nearest_neighbor_ids, 'b *')
+            return inverse_pack_one(nearest_neighbor_ids)
 
         new_codes = x[~within_dist_threshold]
 
@@ -240,7 +250,7 @@ class NearestNeighborTokenizer(Module):
 
         nearest_neighbor_ids.masked_fill_(~within_dist_threshold, new_code_ids)
 
-        return inverse_pack_one(nearest_neighbor_ids, 'b *')
+        return inverse_pack_one(nearest_neighbor_ids)
 
 # attention
 
@@ -564,7 +574,7 @@ class WorldModel(Module):
         self,
         state_or_token_ids: Float['b c t h w'] | Int['b t h w'],
         rewards: Float['b t'] | None = None,
-        actions: Int['b t na'] | None = None,
+        actions: Int['b t na'] | None = None, # values of < 0 as padding, allowing for multiple actions to be summed per timestep
         return_loss = True,
         return_loss_breakdown = False
     ):
@@ -595,8 +605,6 @@ class WorldModel(Module):
         # maybe action conditioniong
 
         if exists(actions):
-            # Int['b t n'], with -1 or < 0 as padding, allowing for multiple actions to be summed per timestep
-
             no_action = actions < 0
             actions = actions.masked_fill(no_action, 0)
             action_embeds = self.action_embed(actions)
@@ -628,8 +636,6 @@ class WorldModel(Module):
         reward_loss = self.zero
 
         if exists(rewards):
-            # Float['b t']
-
             embeds_with_spacetime = inverse_pack_space_time(embeds)
 
             # average pool for embeddings to project into rewards per time step
