@@ -17,6 +17,8 @@ from hyper_connections import get_init_and_expand_reduce_stream_functions
 
 from improving_transformers_world_model.distributed import all_gather_variable_dim
 
+from hl_gauss_pytorch import HLGaussLoss
+
 from rotary_embedding_torch import RotaryEmbedding
 
 # helper functions
@@ -428,6 +430,12 @@ class WorldModel(Module):
         image_size,
         patch_size,
         channels,
+        reward_min_value = 0.,
+        reward_max_value = 1.,
+        reward_num_bins = 0., # if set to 0, disabled
+        hl_gauss_loss_kwargs: dict = dict(
+            sigma_to_bin_ratio = 1. # amount of label smoothing
+        ),
         transformer_use_token_embed = True,
         tokenizer: NearestNeighborTokenizer | Module | dict = dict(),
         transformer: BlockCausalTransformer | dict = dict(),
@@ -460,7 +468,27 @@ class WorldModel(Module):
 
         model_dim = transformer.dim
         self.proj_in = nn.Linear(patch_size_with_channel, model_dim)
-        self.to_pred = nn.Linear(model_dim, tokenizer.max_codes)
+
+        self.to_state_pred = nn.Linear(model_dim, tokenizer.max_codes)
+
+        # reward related
+
+        can_pred_reward = reward_num_bins > 0
+
+        self.can_pred_reward = can_pred_reward
+
+        self.to_reward_pred = nn.Linear(model_dim, num_reward_bins) if can_pred_reward else None
+
+        self.hl_gauss_loss = HLGaussLoss(
+            min_value = reward_min_value,
+            max_value = reward_max_value,
+            num_bins = reward_num_bins,
+            **hl_gauss_loss_kwargs
+        ) if can_pred_reward else None
+
+        # zero for device and dummy
+
+        self.register_buffer('zero', tensor(0.), persistent = False)
 
     @torch.inference_mode()
     def sample(
@@ -509,8 +537,12 @@ class WorldModel(Module):
     def forward(
         self,
         state_or_token_ids,
-        return_loss = True
+        rewards = None,
+        return_loss = True,
+        return_loss_breakdown = False
     ):
+
+        assert xnor(exists(rewards), self.can_pred_reward)
 
         if state_or_token_ids.dtype  == torch.float:
             patches = self.state_to_patches(state_or_token_ids)
@@ -520,7 +552,7 @@ class WorldModel(Module):
             token_ids = state_or_token_ids
 
         if return_loss:
-            token_ids, labels = token_ids[:, :-1], token_ids[:, 1:]
+            token_ids, state_labels = token_ids[:, :-1], token_ids[:, 1:]
 
         # either use own learned token embeddings
         # or project the codes (which are just the nearest neighbor memorized patch) and project
@@ -536,17 +568,35 @@ class WorldModel(Module):
 
         embeds = self.transformer(tokens)
 
-        logits = self.to_pred(embeds)
+        state_logits = self.to_state_pred(embeds)
 
-        logits = inverse_pack_space_time(logits)
+        state_logits = inverse_pack_space_time(state_logits)
 
         if not return_loss:
-            return logits
+            return state_logits
 
-        loss = F.cross_entropy(
-            rearrange(logits, 'b ... l -> b l (...)'),
-            rearrange(labels, 'b ... -> b (...)'),
+        state_loss = F.cross_entropy(
+            rearrange(state_logits, 'b ... l -> b l (...)'),
+            rearrange(state_labels, 'b ... -> b (...)'),
             ignore_index = -1
         )
 
-        return loss
+        reward_loss = self.zero
+
+        if exists(rewards):
+            embeds_with_spacetime = inverse_pack_space_time(embeds)
+
+            # average pool for embeddings to project into rewards per time step
+
+            embeds_with_time = reduce(embeds_with_spacetime, 'b t ... d -> b t d', 'mean')
+
+            reward_logits = self.to_reward_pred(embeds_with_time)
+
+            reward_loss = self.hl_gauss_loss(reward_logits, rewards)
+
+        total_loss = state_loss + reward_loss
+
+        if not return_loss_breakdown:
+            return total_loss
+
+        return total_loss, (state_loss, reward_loss)
