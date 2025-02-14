@@ -165,6 +165,8 @@ class NearestNeighborTokenizer(Module):
         self,
         codes: Float['... d']
     ):
+        codes, _ = all_gather_variable_dim(codes)
+
         codes, _ = pack_one(codes, '* d')
 
         codes_added = 0
@@ -193,7 +195,6 @@ class NearestNeighborTokenizer(Module):
         self,
         x: Float['b ... d'],
         ignore_dist_threshold = None,
-        return_distance = False
     ):
 
         ignore_dist_threshold = default(ignore_dist_threshold, not self.training or self.is_at_max_codes)
@@ -242,9 +243,7 @@ class NearestNeighborTokenizer(Module):
 
         new_codes = x[~within_dist_threshold]
 
-        all_new_codes, _ = all_gather_variable_dim(new_codes)
-
-        self.add_codes_(all_new_codes)
+        self.add_codes_(new_codes)
 
         new_code_ids = cdist(new_codes, self.codes).argmin(dim = -1)
 
