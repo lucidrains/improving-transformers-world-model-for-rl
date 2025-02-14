@@ -430,9 +430,10 @@ class WorldModel(Module):
         image_size,
         patch_size,
         channels,
+        num_actions = 0,            # if set to 0, disabled
         reward_min_value = 0.,
         reward_max_value = 1.,
-        reward_num_bins = 0., # if set to 0, disabled
+        reward_num_bins = 0.,       # if set to 0, disabled
         hl_gauss_loss_kwargs: dict = dict(
             sigma_to_bin_ratio = 1. # amount of label smoothing
         ),
@@ -462,7 +463,7 @@ class WorldModel(Module):
 
         self.tokenizer = tokenizer
 
-        self.token_embed = nn.Embedding(tokenizer.max_codes, transformer.dim) if transformer_use_token_embed else None
+        self.state_token_embed = nn.Embedding(tokenizer.max_codes, transformer.dim) if transformer_use_token_embed else None
 
         # projecting in and out from patches to model dimensions
 
@@ -470,6 +471,13 @@ class WorldModel(Module):
         self.proj_in = nn.Linear(patch_size_with_channel, model_dim)
 
         self.to_state_pred = nn.Linear(model_dim, tokenizer.max_codes)
+
+        # action conditioning related
+
+        can_cond_on_actions = num_actions > 0
+        self.can_cond_on_actions = can_cond_on_actions
+
+        self.action_embed = nn.Embedding(num_actions, dim) if can_cond_on_actions else None
 
         # reward related
 
@@ -538,11 +546,13 @@ class WorldModel(Module):
         self,
         state_or_token_ids,
         rewards = None,
+        actions = None,
         return_loss = True,
         return_loss_breakdown = False
     ):
 
         assert xnor(exists(rewards), self.can_pred_reward)
+        assert xnor(exists(actions), self.can_cond_on_actions)
 
         if state_or_token_ids.dtype  == torch.float:
             patches = self.state_to_patches(state_or_token_ids)
@@ -558,11 +568,27 @@ class WorldModel(Module):
         # or project the codes (which are just the nearest neighbor memorized patch) and project
         # todo: maybe allow for a bit of both with learned mix
 
-        if exists(self.token_embed):
-            tokens = self.token_embed(token_ids)
+        if exists(self.state_token_embed):
+            tokens = self.state_token_embed(token_ids)
         else:
             tokens = self.tokenizer.codes_from_indices(token_ids)
             tokens = self.proj_in(tokens)
+
+        # maybe action conditioniong
+
+        if exists(actions):
+            # Int['b t n'], with -1 or < 0 as padding, allowing for multiple actions to be summed per timestep
+
+            no_action = actions < 0
+            actions = actions.masked_fill(no_action, 0)
+            action_embeds = self.action_embed(actions)
+
+            action_embeds = einx.where('b t n, b t n d, -> b t n d', ~no_actions, action_embeds, 0.)
+            action_embeds = reduce(action_embeds, 'b t n d -> b t d', 'sum')
+
+            tokens = einx.add('b t h w d, b t d -> b t h w d', tokens, action_embeds)
+
+        # pack the spacetime dimension into one sequence for block causal attention
 
         tokens, inverse_pack_space_time = pack_one_with_inverse(tokens, 'b * d')
 
@@ -584,6 +610,8 @@ class WorldModel(Module):
         reward_loss = self.zero
 
         if exists(rewards):
+            # Float['b t']
+
             embeds_with_spacetime = inverse_pack_space_time(embeds)
 
             # average pool for embeddings to project into rewards per time step
