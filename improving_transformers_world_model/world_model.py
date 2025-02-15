@@ -187,15 +187,15 @@ class NearestNeighborTokenizer(Module):
 
     def codes_from_indices(
         self,
-        indices: Int['b ...']
-    ):
+        indices: Int['b *dims']
+    ) -> Float['b *dims d']:
         return einx.get_at('[c] d, ... -> ... d', self._codes, indices)
 
     def forward(
         self,
-        x: Float['b ... d'],
+        x: Float['b *dims d'],
         ignore_dist_threshold = None,
-    ):
+    ) -> Int['b *dims']:
 
         ignore_dist_threshold = default(ignore_dist_threshold, not self.training or self.is_at_max_codes)
 
