@@ -27,6 +27,8 @@ from improving_transformers_world_model.tensor_typing import (
     Bool
 )
 
+from tqdm import tqdm
+
 # ein notation
 
 # b - batch
@@ -295,7 +297,8 @@ class BlockCausalAttention(Module):
         self,
         x,
         value_residual = None,
-        flex_attn_block_mask = None
+        flex_attn_block_mask = None,
+        cache = None,
     ):
         x = self.norm(x)
 
@@ -306,6 +309,23 @@ class BlockCausalAttention(Module):
 
         orig_v = v
 
+        # value residual
+
+        if exists(value_residual):
+            value_residual_mix = self.to_value_residual_mix(x)
+            v = v.lerp(value_residual, value_residual_mix)
+
+        # handle cache
+
+        is_inferencing = exists(cache)
+
+        if is_inferencing:
+            ck, cv = cache
+            k = cat((ck, k), dim = -2)
+            v = cat((cv, v), dim = -2)
+
+        next_cache = (k, v)
+
         # rotary embed
 
         q, k = self.rotary_emb.rotate_queries_with_cached_keys(q, k)
@@ -314,21 +334,17 @@ class BlockCausalAttention(Module):
 
         assert xnor(exists(value_residual), self.accept_value_residual)
 
-        if exists(value_residual):
-            value_residual_mix = self.to_value_residual_mix(x)
-            v = v.lerp(value_residual, value_residual_mix)
-
-        if exists(flex_attn_block_mask):
+        if not is_inferencing and exists(flex_attn_block_mask):
             out = flex_attention(q, k, v, block_mask = flex_attn_block_mask)
         else:
             # block causal mask
 
-            block_causal_mask = nonflex_block_causal_mask(seq_len, self.block_size, device = device)
-
             q = q * self.scale
             sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
 
-            sim = sim.masked_fill(~block_causal_mask, -torch.finfo(sim.dtype).max)
+            if not is_inferencing:
+                block_causal_mask = nonflex_block_causal_mask(seq_len, self.block_size, device = device)
+                sim = sim.masked_fill(~block_causal_mask, -torch.finfo(sim.dtype).max)
 
             attn = sim.softmax(dim = -1)
 
@@ -338,7 +354,7 @@ class BlockCausalAttention(Module):
 
         out = self.merge_heads(out)
 
-        return self.to_out(out), orig_v
+        return self.to_out(out), (orig_v, next_cache)
 
 # feedforward, swi glu variant from Shazeer et al.
 
@@ -411,7 +427,9 @@ class BlockCausalTransformer(Module):
 
     def forward(
         self,
-        tokens
+        tokens,
+        cache = None,
+        return_cache = False
     ):
 
         seq_len = tokens.shape[1]
@@ -419,6 +437,15 @@ class BlockCausalTransformer(Module):
         # hyper connection residual streams
 
         tokens = self.expand_streams(tokens)
+
+        # handle cache
+
+        if exists(cache):
+            cache_len = cache[0][0].shape[-2]
+            tokens = tokens[:, cache_len:]
+
+        iter_cache = iter(default(cache, []))
+        next_cache_kvs = []
 
         # value residuals
 
@@ -428,14 +455,21 @@ class BlockCausalTransformer(Module):
 
         flex_attn_block_mask = None
 
-        if self.use_flex_attn:
+        if not exists(cache) and self.use_flex_attn:
             flex_attn_block_mask = create_block_causal_mask(seq_len, self.block_size)
 
         # layers of attention and feedforward
 
         for attn, ff in self.layers:
-            tokens, attn_values = attn(tokens, value_residual = first_attn_values, flex_attn_block_mask = flex_attn_block_mask)
+            tokens, (attn_values, attn_cache_kv) = attn(
+                tokens,
+                cache = next(iter_cache, None),
+                value_residual = first_attn_values,
+                flex_attn_block_mask = flex_attn_block_mask
+            )
 
+            next_cache_kvs.append(attn_cache_kv)
+        
             first_attn_values = default(first_attn_values, attn_values)
 
             tokens = ff(tokens)
@@ -446,7 +480,10 @@ class BlockCausalTransformer(Module):
 
         embed = self.norm(tokens)
 
-        return embed
+        if not return_cache:
+            return embed
+
+        return embed, next_cache_kvs
 
 # world model
 # their proposed successful world model is a memorizing nearest neighbor tokenizer + block causal transformer
@@ -547,10 +584,14 @@ class WorldModel(Module):
 
         ids = self.tokenizer(patches)
 
-        for _ in range(time_steps - prompt_time):
-            logits = self.forward(
+        cache = None
+
+        for _ in tqdm(range(time_steps - prompt_time)):
+            logits, cache = self.forward(
                 ids,
-                return_loss = False
+                cache = cache,
+                return_loss = False,
+                return_cache = True
             )
 
             logits = logits[:, -1:] # last timestep logits
@@ -574,6 +615,8 @@ class WorldModel(Module):
         state_or_token_ids: Float['b c t h w'] | Int['b t h w'],
         rewards: Float['b t'] | None = None,
         actions: Int['b t na'] | None = None, # values of < 0 as padding, allowing for multiple actions to be summed per timestep
+        cache = None,
+        return_cache = False,
         return_loss = True,
         return_loss_breakdown = False
     ):
@@ -613,18 +656,29 @@ class WorldModel(Module):
 
             tokens = einx.add('b t h w d, b t d -> b t h w d', tokens, action_embeds)
 
+        is_inferencing = exists(cache)
+
         # pack the spacetime dimension into one sequence for block causal attention
 
-        tokens, inverse_pack_space_time = pack_one_with_inverse(tokens, 'b * d')
+        tokens, inverse_space = pack_one_with_inverse(tokens, 'b t * d')
+        tokens, inverse_time = pack_one_with_inverse(tokens, 'b * d')
 
-        embeds = self.transformer(tokens)
+        embeds, next_cache = self.transformer(tokens, cache = cache, return_cache = True)
 
         state_logits = self.to_state_pred(embeds)
 
-        state_logits = inverse_pack_space_time(state_logits)
+        if not is_inferencing:
+            state_logits = inverse_time(state_logits)
+        else:
+            state_logits = rearrange(state_logits, 'b n d -> b 1 n d')
+
+        state_logits = inverse_space(state_logits)
 
         if not return_loss:
-            return state_logits
+            if not return_cache:
+                return state_logits
+
+            return state_logits, next_cache
 
         state_loss = F.cross_entropy(
             rearrange(state_logits, 'b ... l -> b l (...)'),
