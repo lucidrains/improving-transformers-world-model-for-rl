@@ -30,6 +30,7 @@ dependencies = [
     "hl-gauss-pytorch>=0.1.16",
     "hyper-connections>=0.1.11",
     "jaxtyping",
+    "pufferlib>=2.0.6",
     "rotary-embedding-torch>=0.8.6",
     "torch>=2.2",
     "tqdm",
