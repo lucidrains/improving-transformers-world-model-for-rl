@@ -581,6 +581,7 @@ class WorldModel(Module):
         self,
         prompt: Float['b c t h w'],
         time_steps,
+        actions: Int['b t na'] | None = None,
         filter_fn = min_p_filter,
         filter_kwargs: dict = dict(),
         temperature = 1.5,
@@ -603,6 +604,7 @@ class WorldModel(Module):
         for _ in tqdm(range(time_steps - prompt_time)):
             logits, cache = self.forward(
                 ids,
+                actions = actions,
                 cache = cache,
                 return_loss = False,
                 return_cache = True
@@ -614,6 +616,11 @@ class WorldModel(Module):
             sampled = gumbel_sample(logits, temperature = temperature, dim = -1, keepdim = False)
 
             ids = cat((ids, sampled), dim = 1)
+
+            # will sticky the action to the very last action for now
+
+            if exists(actions):
+                actions = actions[:, -1:]
 
         self.train(was_training)
 
