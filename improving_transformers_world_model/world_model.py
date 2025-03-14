@@ -18,7 +18,7 @@ from hl_gauss_pytorch import HLGaussLoss
 from rotary_embedding_torch import RotaryEmbedding
 
 import einx
-from einops import rearrange, repeat, pack, unpack, einsum
+from einops import rearrange, repeat, reduce, pack, unpack, einsum
 from einops.layers.torch import Rearrange
 
 from improving_transformers_world_model.tensor_typing import (
@@ -536,6 +536,13 @@ class WorldModel(Module):
 
         self.to_state_pred = nn.Linear(model_dim, tokenizer.max_codes)
 
+        # is terminal state
+
+        self.to_is_terminal_pred = nn.Sequential(
+            nn.Linear(model_dim, 1, bias = False),
+            Rearrange('... 1 -> ...')
+        )
+
         # action conditioning related
 
         can_cond_on_actions = num_actions > 0
@@ -615,6 +622,7 @@ class WorldModel(Module):
         state_or_token_ids: Float['b c t h w'] | Int['b t h w'],
         rewards: Float['b t'] | None = None,
         actions: Int['b t na'] | None = None, # values of < 0 as padding, allowing for multiple actions to be summed per timestep
+        is_terminal: Bool['b t'] | None = None, # learn to predict the terminal state, for the agent interacting with the world model in MDP manner
         cache = None,
         return_cache = False,
         return_loss = True,
@@ -686,20 +694,45 @@ class WorldModel(Module):
             ignore_index = -1
         )
 
-        reward_loss = self.zero
+        # maybe pool embeds across space if predicting reward and terminal
 
-        if exists(rewards):
-            embeds_with_spacetime = inverse_pack_space_time(embeds)
+        need_pool_space = exists(rewards) or exists(is_terminal)
+
+        if need_pool_space:
+            embeds_with_spacetime = inverse_space(inverse_time(embeds))
 
             # average pool for embeddings to project into rewards per time step
 
             embeds_with_time = reduce(embeds_with_spacetime, 'b t ... d -> b t d', 'mean')
 
+        # maybe predict reward
+
+        reward_loss = self.zero
+
+        if exists(rewards):
             reward_logits = self.to_reward_pred(embeds_with_time)
 
             reward_loss = self.hl_gauss_loss(reward_logits, rewards)
 
-        total_loss = state_loss + reward_loss
+        # maybe predict if state at given time is terminal
+
+        is_terminal_loss = self.zero
+
+        if exists(is_terminal):
+            is_terminal_logits = self.to_is_terminal_pred(embeds_with_time)
+
+            is_terminal_loss = F.binary_cross_entropy_with_logits(
+                is_terminal_logits,
+                is_terminal[:, 1:].float()
+            )
+
+        # add all losses
+
+        total_loss = (
+            state_loss +
+            is_terminal_loss +
+            reward_loss
+        )
 
         if not return_loss_breakdown:
             return total_loss
