@@ -556,6 +556,13 @@ class WorldModel(Module):
 
         self.can_pred_reward = can_pred_reward
 
+        self.to_reward_embed = nn.Sequential(
+            Rearrange('... -> ... 1'),
+            nn.Linear(1, model_dim),
+            nn.ReLU(),
+            nn.Linear(model_dim, model_dim)
+        ) if can_pred_reward else None
+
         self.to_reward_pred = nn.Linear(model_dim, num_reward_bins) if can_pred_reward else None
 
         self.hl_gauss_loss = HLGaussLoss(
@@ -652,7 +659,13 @@ class WorldModel(Module):
             tokens = self.tokenizer.codes_from_indices(token_ids)
             tokens = self.proj_in(tokens)
 
-        # maybe action conditioniong
+        # maybe reward cnoditioning
+
+        if exists(rewards):
+            reward_embeds = self.to_reward_embeds(rewards)
+            tokens = einx.add('b t h w d, b t d -> b t h w d', tokens, reward_embeds)
+
+        # maybe action conditioning
 
         if exists(actions):
             no_action = actions < 0
