@@ -581,11 +581,13 @@ class WorldModel(Module):
         self,
         prompt: Float['b c t h w'],
         time_steps,
+        cache = None,
         actions: Int['b t na'] | None = None,
         filter_fn = min_p_filter,
         filter_kwargs: dict = dict(),
         temperature = 1.5,
-        return_token_ids = False
+        return_token_ids = False,
+        return_cache = False
     ):
         was_training = self.training
 
@@ -598,8 +600,6 @@ class WorldModel(Module):
         patches = self.state_to_patches(prompt)
 
         ids = self.tokenizer(patches)
-
-        cache = None
 
         for _ in tqdm(range(time_steps - prompt_time)):
             logits, cache = self.forward(
@@ -625,11 +625,20 @@ class WorldModel(Module):
         self.train(was_training)
 
         if return_token_ids:
-            return ids
+
+            if not return_cache:
+                return ids
+
+            return ids, cache
 
         nearest_neighbor_codes = self.tokenizer.codes_from_indices(ids)
 
-        return self.patches_to_state(nearest_neighbor_codes)
+        state = self.patches_to_state(nearest_neighbor_codes)
+
+        if not return_cache:
+            return state
+
+        return state, cache
 
     def forward(
         self,
