@@ -602,7 +602,7 @@ class WorldModel(Module):
         ids = self.tokenizer(patches)
 
         for _ in tqdm(range(time_steps - prompt_time)):
-            logits, cache = self.forward(
+            (state_logits, _, _), cache = self.forward(
                 ids,
                 actions = actions,
                 cache = cache,
@@ -610,10 +610,10 @@ class WorldModel(Module):
                 return_cache = True
             )
 
-            logits = logits[:, -1:] # last timestep logits
+            state_logits = state_logits[:, -1:] # last timestep logits
 
-            logits = filter_fn(logits, **filter_kwargs)
-            sampled = gumbel_sample(logits, temperature = temperature, dim = -1, keepdim = False)
+            state_logits = filter_fn(state_logits, **filter_kwargs)
+            sampled = gumbel_sample(state_logits, temperature = temperature, dim = -1, keepdim = False)
 
             ids = cat((ids, sampled), dim = 1)
 
@@ -711,11 +711,35 @@ class WorldModel(Module):
 
         state_logits = inverse_space(state_logits)
 
-        if not return_loss:
-            if not return_cache:
-                return state_logits
+        # maybe pool embeds across space if predicting reward and terminal
 
-            return state_logits, next_cache
+        if not is_inferencing:
+            embeds_with_spacetime = inverse_space(inverse_time(embeds))
+
+            # average pool for embeddings to project into rewards per time step
+
+            embeds_with_time = reduce(embeds_with_spacetime, 'b t ... d -> b t d', 'mean')
+        else:
+            embeds_with_space = inverse_space(embeds, 'b * d')
+
+            embeds_with_time = reduce(embeds_with_space, 'b ... d -> b 1 d', 'mean')
+
+        # reward and terminal
+
+        reward_logits = None
+
+        if self.can_pred_reward:
+            reward_logits = self.to_reward_pred(embeds_with_time)
+
+        is_terminal_logits = self.to_is_terminal_pred(embeds_with_time)
+
+        if not return_loss:
+            logits = (state_logits, reward_logits, is_terminal_logits)
+
+            if not return_cache:
+                return logits
+
+            return logits, next_cache
 
         state_loss = F.cross_entropy(
             rearrange(state_logits, 'b ... l -> b l (...)'),
@@ -723,24 +747,11 @@ class WorldModel(Module):
             ignore_index = -1
         )
 
-        # maybe pool embeds across space if predicting reward and terminal
-
-        need_pool_space = exists(rewards) or exists(is_terminal)
-
-        if need_pool_space:
-            embeds_with_spacetime = inverse_space(inverse_time(embeds))
-
-            # average pool for embeddings to project into rewards per time step
-
-            embeds_with_time = reduce(embeds_with_spacetime, 'b t ... d -> b t d', 'mean')
-
         # maybe predict reward
 
         reward_loss = self.zero
 
         if exists(rewards):
-            reward_logits = self.to_reward_pred(embeds_with_time)
-
             reward_loss = self.hl_gauss_loss(reward_logits, rewards)
 
         # maybe predict if state at given time is terminal
@@ -748,8 +759,6 @@ class WorldModel(Module):
         is_terminal_loss = self.zero
 
         if exists(is_terminal):
-            is_terminal_logits = self.to_is_terminal_pred(embeds_with_time)
-
             is_terminal_loss = F.binary_cross_entropy_with_logits(
                 is_terminal_logits,
                 is_terminal[:, 1:].float()
