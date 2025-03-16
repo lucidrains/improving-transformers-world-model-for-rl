@@ -563,7 +563,7 @@ class WorldModel(Module):
             nn.Linear(model_dim, model_dim)
         ) if can_pred_reward else None
 
-        self.to_reward_pred = nn.Linear(model_dim, num_reward_bins) if can_pred_reward else None
+        self.to_reward_pred = nn.Linear(model_dim, reward_num_bins) if can_pred_reward else None
 
         self.hl_gauss_loss = HLGaussLoss(
             min_value = reward_min_value,
@@ -582,18 +582,20 @@ class WorldModel(Module):
         prompt: Float['b c t h w'],
         time_steps,
         cache = None,
+        rewards: Float['b t'] | None = None,
         actions: Int['b t na'] | None = None,
         filter_fn = min_p_filter,
         filter_kwargs: dict = dict(),
         temperature = 1.5,
         return_token_ids = False,
-        return_cache = False
+        return_cache = False,
+        return_rewards_and_done = False
     ):
         was_training = self.training
 
         self.eval()
 
-        prompt_time = prompt.shape[-3]
+        batch, prompt_time, device = prompt.shape[0], prompt.shape[-3], prompt.device
 
         assert prompt_time <= time_steps, f'nothing to sample, as prompt already is greater or equal to desired number of time steps'
 
@@ -601,21 +603,46 @@ class WorldModel(Module):
 
         ids = self.tokenizer(patches)
 
+        if return_rewards_and_done:
+
+            if not exists(rewards):
+                rewards = torch.zeros((batch, prompt_time), device = device)
+
+            is_terminals = torch.zeros((batch, prompt_time), device = device, dtype = torch.bool)
+
         for _ in tqdm(range(time_steps - prompt_time)):
-            (state_logits, _, _), cache = self.forward(
+
+            (state_logits, reward_logits, is_terminal_logits), cache = self.forward(
                 ids,
                 actions = actions,
+                rewards = rewards,
                 cache = cache,
                 return_loss = False,
                 return_cache = True
             )
 
+            # sample next state
+
             state_logits = state_logits[:, -1:] # last timestep logits
 
             state_logits = filter_fn(state_logits, **filter_kwargs)
-            sampled = gumbel_sample(state_logits, temperature = temperature, dim = -1, keepdim = False)
+            next_state_ids = gumbel_sample(state_logits, temperature = temperature, dim = -1, keepdim = False)
 
-            ids = cat((ids, sampled), dim = 1)
+            ids = cat((ids, next_state_ids), dim = 1)
+
+            # next reward
+
+            if exists(rewards):
+                next_rewards = self.hl_gauss_loss(reward_logits[:, -1:])
+
+                rewards = cat((rewards, next_rewards), dim = 1)
+
+            # done state
+
+            if return_rewards_and_done:
+                is_terminal = is_terminal_logits.sigmoid().round().bool()
+
+                is_terminals = cat((is_terminals, is_terminal), dim = -1)
 
             # will sticky the action to the very last action for now
 
@@ -624,21 +651,29 @@ class WorldModel(Module):
 
         self.train(was_training)
 
+        out = ids
+
+        if return_rewards_and_done:
+            out = (out, rewards, is_terminals)
+
         if return_token_ids:
 
             if not return_cache:
-                return ids
+                return out
 
-            return ids, cache
+            return out, cache
 
         nearest_neighbor_codes = self.tokenizer.codes_from_indices(ids)
 
         state = self.patches_to_state(nearest_neighbor_codes)
 
-        if not return_cache:
-            return state
+        if return_rewards_and_done:
+            out = (state, rewards, is_terminals)
 
-        return state, cache
+        if not return_cache:
+            return out
+
+        return out, cache
 
     def forward(
         self,
@@ -665,6 +700,10 @@ class WorldModel(Module):
         if return_loss:
             token_ids, state_labels = token_ids[:, :-1], token_ids[:, 1:]
 
+            is_terminal_labels = is_terminal[:, 1:]
+
+            rewards, last_reward = rewards[:, :-1], rewards[:, -1:]
+
         # either use own learned token embeddings
         # or project the codes (which are just the nearest neighbor memorized patch) and project
         # todo: maybe allow for a bit of both with learned mix
@@ -678,7 +717,8 @@ class WorldModel(Module):
         # maybe reward cnoditioning
 
         if exists(rewards):
-            reward_embeds = self.to_reward_embeds(rewards)
+            reward_embeds = self.to_reward_embed(rewards)
+
             tokens = einx.add('b t h w d, b t d -> b t h w d', tokens, reward_embeds)
 
         # maybe action conditioning
@@ -761,7 +801,7 @@ class WorldModel(Module):
         if exists(is_terminal):
             is_terminal_loss = F.binary_cross_entropy_with_logits(
                 is_terminal_logits,
-                is_terminal[:, 1:].float()
+                is_terminal_labels.float()
             )
 
         # add all losses
