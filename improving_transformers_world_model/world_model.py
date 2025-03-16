@@ -498,12 +498,14 @@ class WorldModel(Module):
         reward_min_value = 0.,
         reward_max_value = 1.,
         reward_num_bins = 0.,       # if set to 0, disabled
-        hl_gauss_loss_kwargs: dict = dict(
-            sigma_to_bin_ratio = 1. # amount of label smoothing
-        ),
         transformer_use_token_embed = True,
         tokenizer: NearestNeighborTokenizer | Module | dict = dict(),
         transformer: BlockCausalTransformer | dict = dict(),
+        hl_gauss_loss_kwargs: dict = dict(
+            sigma_to_bin_ratio = 1. # amount of label smoothing
+        ),
+        is_terminal_loss_weight = 1.,
+        reward_loss_weight = 1.
     ):
         super().__init__()
 
@@ -571,6 +573,12 @@ class WorldModel(Module):
             num_bins = reward_num_bins,
             **hl_gauss_loss_kwargs
         ) if can_pred_reward else None
+
+        # loss related
+
+        self.is_terminal_loss_weight = is_terminal_loss_weight
+
+        self.reward_loss_weight = reward_loss_weight
 
         # zero for device and dummy
 
@@ -808,11 +816,11 @@ class WorldModel(Module):
 
         total_loss = (
             state_loss +
-            is_terminal_loss +
-            reward_loss
+            (is_terminal_loss * self.is_terminal_loss_weight) +
+            (reward_loss * self.reward_loss_weight)
         )
 
         if not return_loss_breakdown:
             return total_loss
 
-        return total_loss, (state_loss, reward_loss)
+        return total_loss, (state_loss, reward_loss, is_terminal_loss)
