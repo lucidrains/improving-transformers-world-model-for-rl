@@ -13,6 +13,8 @@ from improving_transformers_world_model.tensor_typing import (
     Bool
 )
 
+from hl_gauss_pytorch import HLGaussLayer
+
 # helper functions
 
 def exists(v):
@@ -81,7 +83,14 @@ class Critic(Module):
         channels,
         num_layers = 4,
         expansion_factor = 2.,
-        init_conv_kernel = 7
+        init_conv_kernel = 7,
+        use_regression = False,
+        hl_gauss_loss_kwargs = dict(
+            min_value = 0.,
+            max_value = 5.,
+            num_bins = 32,
+            sigma = 0.5,
+        )
     ):
         super().__init__()
         dim_hidden = int(expansion_factor * dim)
@@ -101,10 +110,11 @@ class Critic(Module):
 
         self.layers = ModuleList(layers)
 
-        self.to_value_pred = nn.Sequential(
-            Reduce('b c h w -> b c'),
-            nn.Linear(dim, 1),
-            Rearrange('b 1 -> b')
+        self.pool = Reduce('b c h w -> b c')
+
+        self.to_value_pred = HLGaussLayer(
+            dim = dim,
+            hl_gauss_loss = hl_gauss_loss_kwargs
         )
 
     def forward(
@@ -119,7 +129,8 @@ class Critic(Module):
         for layer in self.layers:
             embed = layer(embed) + embed
 
-        values = self.to_value_pred(embed)
+        pooled = self.pool(embed)
+        values = self.to_value_pred(pooled)
 
         if not exists(returns):
             return values
