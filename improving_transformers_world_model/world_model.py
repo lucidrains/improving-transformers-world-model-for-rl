@@ -38,7 +38,7 @@ from tqdm import tqdm
 # w - width
 # n - sequence (flattened spacetime)
 # h - attention heads
-# na - number of actions
+# a - number of actions
 # l - logits / prediction bins
 
 # helper functions
@@ -591,7 +591,7 @@ class WorldModel(Module):
         time_steps,
         cache = None,
         rewards: Float['b t'] | None = None,
-        actions: Int['b t na'] | None = None,
+        actions: Int['b t a'] | None = None,
         filter_fn = min_p_filter,
         filter_kwargs: dict = dict(),
         temperature = 1.5,
@@ -687,7 +687,7 @@ class WorldModel(Module):
         self,
         state_or_token_ids: Float['b c t h w'] | Int['b t h w'],
         rewards: Float['b t'] | None = None,
-        actions: Int['b t na'] | None = None, # values of < 0 as padding, allowing for multiple actions to be summed per timestep
+        actions: Int['b t a'] | None = None, # values of < 0 as padding, allowing for multiple actions to be summed per timestep
         is_terminal: Bool['b t'] | None = None, # learn to predict the terminal state, for the agent interacting with the world model in MDP manner
         cache = None,
         return_cache = False,
