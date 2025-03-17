@@ -162,6 +162,7 @@ class Critic(Module):
 
 FrameState = Float['c h w']
 Scalar = Float['']
+Loss = Scalar
 
 class Memory(NamedTuple):
     state:           FrameState
@@ -206,7 +207,7 @@ class Agent(Module):
         old_log_probs: Float['b'],
         values: Float['b'],
         returns: Float['b'],
-    ) -> Scalar:
+    ) -> Loss:
 
         batch = values.shape[0]
         advantages = F.layer_norm(returns - values, (batch,))
@@ -231,11 +232,20 @@ class Agent(Module):
 
         return policy_loss
 
+    def critic_loss(
+        self,
+        state: Float['b c h w'],
+        returns: Float['b']
+    ) -> Loss:
+
+        critic_loss = self.critic(state, returns)
+        return critic_loss
+
     def learn(
         self,
         memories: Memories
 
-    ) -> tuple[Scalar, ...]:
+    ) -> tuple[Loss, ...]:
 
         raise NotImplementedError
 
