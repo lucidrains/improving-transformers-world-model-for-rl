@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import NamedTuple
 
 import torch
 from torch import nn, tensor, Tensor
@@ -6,6 +7,10 @@ from torch.nn import Module, ModuleList
 import torch.nn.functional as F
 
 from einops.layers.torch import Reduce
+
+from improving_transformers_world_model.world_model import (
+    WorldModel
+)
 
 from improving_transformers_world_model.tensor_typing import (
     Float,
@@ -137,13 +142,44 @@ class Critic(Module):
 
         return F.mse_loss(values, returns)
 
+# memory
+
+class Memory(NamedTuple):
+    state:           Float['c h w']
+    action:          Int['a']
+    action_log_prob: Float['']
+    reward:          Float['']
+    value:           Float['']
+    done:            Bool['']
+
+# actor critic agent
+
 class Agent(Module):
     def __init__(
         self,
-        actor: Actor,
-        critic: Critic
+        actor: Actor | dict,
+        critic: Critic | dict
     ):
         super().__init__()
 
+        if isinstance(actor, dict):
+            actor = Actor(**actor)
+
+        if isinstance(critic, dict):
+            critic = Critic(**critic)
+
         self.actor = actor
         self.critic = critic
+
+    def learn(
+        self,
+        memories: list[Memory]
+    ):
+        raise NotImplementedError
+
+    def forward(
+        self,
+        world_model: WorldModel
+    ) -> list[Memory]:
+
+        raise NotImplementedError

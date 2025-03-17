@@ -547,6 +547,8 @@ class WorldModel(Module):
 
         # action conditioning related
 
+        self.num_actions = num_actions
+
         can_cond_on_actions = num_actions > 0
         self.can_cond_on_actions = can_cond_on_actions
 
