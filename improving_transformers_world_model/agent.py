@@ -2,12 +2,13 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import torch
-from torch import nn, tensor, Tensor
+from torch import nn, cat, tensor, Tensor
 from torch.nn import Module, ModuleList
 from torch.distributions import Categorical
 
 import torch.nn.functional as F
 
+from einops import rearrange
 from einops.layers.torch import Reduce
 
 from improving_transformers_world_model.world_model import (
@@ -53,6 +54,8 @@ class Actor(Module):
         init_conv_kernel = 7
     ):
         super().__init__()
+        self.num_actions = num_actions
+
         self.image_size = image_size
         self.channels = channels
 
@@ -80,8 +83,12 @@ class Actor(Module):
 
     def forward(
         self,
-        state: Float['b c h w']
-    ) -> Float['b a']:
+        state: Float['b c h w'],
+        sample_action = False
+    ) -> (
+        Float['b'] |
+        tuple[Int['b'], Float['b']]
+    ):
 
         embed = self.proj_in(state)
 
@@ -90,7 +97,18 @@ class Actor(Module):
 
         action_logits = self.to_actions_pred(embed)
 
-        return action_logits
+        if not sample_action:
+            return action_logits
+
+        prob = action_logits.softmax(dim = -1)
+
+        distrib = Categorical(prob)
+
+        actions = distrib.sample()
+
+        log_probs = distrib.log_prob(actions)
+
+        return (actions, log_probs)
 
 class Critic(Module):
     def __init__(
@@ -249,16 +267,90 @@ class Agent(Module):
 
         raise NotImplementedError
 
+    @torch.no_grad()
     def forward(
         self,
         world_model: WorldModel,
-        init_state: FrameState
+        init_state: FrameState,
+        memories: Memories | None = None,
+        max_steps = float('inf')
 
     ) -> tuple[
         Memories,
         FrameState
     ]:
+        device = init_state.device
 
         assert world_model.image_size == self.actor.image_size and world_model.channels == self.actor.channels
+        assert world_model.num_actions == self.actor.num_actions
 
-        raise NotImplementedError
+        memories = default(memories, [])
+
+        next_state = rearrange(init_state, 'c h w -> 1 c h w')
+
+        # prepare for looping with world model
+        # gathering up all the memories of states, actions, rewards for training
+
+        actions = torch.empty((1, 0, 1), device = device, dtype = torch.long)
+        action_log_probs = torch.empty((1, 0), device = device, dtype = torch.float32)
+
+        states = rearrange(next_state, '1 c h w -> 1 c 1 h w')
+
+        rewards = torch.zeros((1, 1), device = device, dtype = torch.float32)
+        dones = tensor([[False]], device = device)
+
+        last_done = dones[0, -1]
+        time_step = states.shape[2] + 1
+
+        world_model_cache = None
+
+        while time_step < max_steps and not last_done:
+
+            action, action_log_prob = self.actor(next_state, sample_action = True)
+
+            action_log_prob = rearrange(action_log_prob, 'b -> b 1')
+            action = rearrange(action, 'b -> b 1 1')
+
+            actions = cat((actions, action), dim = 1)
+            action_log_probs = cat((action_log_probs, action_log_prob), dim = 1)
+
+            (states, rewards, dones), world_model_cache = world_model.sample(
+                prompt = states,
+                actions = actions,
+                rewards = rewards,
+                time_steps = time_step,
+                return_rewards_and_done = True,
+                return_cache = True,
+                cache = world_model_cache
+            )
+
+            time_step += 1
+            last_done = dones[0, -1]
+
+        # calculate value from critic all at once before storing to memory
+
+        values = self.critic(rearrange(states, '1 c t h w -> t c h w'))
+        values = rearrange(values, 't -> 1 t')
+
+        # move all intermediates to cpu and detach and store into memory for learning actor and critic
+
+        states, actions, action_log_probs, rewards, values, dones = tuple(rearrange(t, '1 ... -> ...').cpu() for t in (states, actions, action_log_probs, rewards, values, dones))
+
+        states, next_state = states[:, :-1], states[:, -1:]
+
+        rewards = rewards[:-1]
+        values = values[:-1]
+        dones = dones[:-1]
+
+        episode_memories = tuple(Memory(*timestep_tensors) for timestep_tensors in zip(
+            rearrange(states, 'c t h w -> t c h w'),
+            actions,
+            action_log_probs,
+            rewards,
+            values,
+            dones
+        ))
+
+        memories.extend(episode_memories)
+
+        return memories, next_state

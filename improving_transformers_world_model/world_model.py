@@ -555,7 +555,7 @@ class WorldModel(Module):
         can_cond_on_actions = num_actions > 0
         self.can_cond_on_actions = can_cond_on_actions
 
-        self.action_embed = nn.Embedding(num_actions, dim) if can_cond_on_actions else None
+        self.action_embed = nn.Embedding(num_actions, model_dim) if can_cond_on_actions else None
 
         # reward related
 
@@ -589,7 +589,7 @@ class WorldModel(Module):
 
         self.register_buffer('zero', tensor(0.), persistent = False)
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def sample(
         self,
         prompt: Float['b c t h w'],
@@ -715,6 +715,7 @@ class WorldModel(Module):
 
             is_terminal_labels = is_terminal[:, 1:]
 
+            actions, last_action = actions[:, :-1], actions[:, -1:]
             rewards, last_reward = rewards[:, :-1], rewards[:, -1:]
 
         # either use own learned token embeddings
@@ -737,8 +738,8 @@ class WorldModel(Module):
         # maybe action conditioning
 
         if exists(actions):
-            no_action = actions < 0
-            actions = actions.masked_fill(no_action, 0)
+            no_actions = actions < 0
+            actions = actions.masked_fill(no_actions, 0)
             action_embeds = self.action_embed(actions)
 
             action_embeds = einx.where('b t n, b t n d, -> b t n d', ~no_actions, action_embeds, 0.)
