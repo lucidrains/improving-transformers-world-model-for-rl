@@ -4,6 +4,8 @@ from typing import NamedTuple
 import torch
 from torch import nn, tensor, Tensor
 from torch.nn import Module, ModuleList
+from torch.distributions import Categorical
+
 import torch.nn.functional as F
 
 from einops.layers.torch import Reduce
@@ -27,6 +29,14 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
+
+# tensor helpers
+
+def log(t, eps = 1e-20):
+    return torch.log(t.clamp(min = eps))
+
+def calc_entropy(prob, eps = 1e-20, dim = -1):
+    return -(prob * log(prob, eps)).sum(dim = dim)
 
 # classes
 
@@ -150,15 +160,18 @@ class Critic(Module):
 
 # memory
 
+FrameState = Float['c h w']
 Scalar = Float['']
 
 class Memory(NamedTuple):
-    state:           Float['c h w']
+    state:           FrameState
     action:          Int['a']
     action_log_prob: Scalar
     reward:          Scalar
     value:           Scalar
     done:            Bool['']
+
+Memories = list[Memory]
 
 # actor critic agent
 
@@ -166,7 +179,9 @@ class Agent(Module):
     def __init__(
         self,
         actor: Actor | dict,
-        critic: Critic | dict
+        critic: Critic | dict,
+        actor_eps_clip = 0.2, # clipping
+        actor_beta_s = .01,   # entropy weight
     ):
         super().__init__()
 
@@ -179,22 +194,59 @@ class Agent(Module):
         self.actor = actor
         self.critic = critic
 
+        self.actor_eps_clip = actor_eps_clip
+        self.actor_beta_s = actor_beta_s
+
         assert actor.image_size == critic.image_size and actor.channels == critic.channels
+
+    def policy_loss(
+        self,
+        state: Float['b c h w'],
+        actions: Int['b'],
+        old_log_probs: Float['b'],
+        values: Float['b'],
+        returns: Float['b'],
+    ) -> Scalar:
+
+        batch = values.shape[0]
+        advantages = F.layer_norm(returns - values, (batch,))
+
+        action_logits = self.actor(state)
+        prob = action_logits.softmax(dim = -1)
+
+        distrib = Categorical(prob)
+        log_probs = distrib.log_prob(actions)
+
+        ratios = (log_probs - old_log_probs).exp()
+
+        # ppo clipped surrogate objective
+
+        clip = self.actor_eps_clip
+
+        surr1 = ratios * advantages
+        surr2 = ratios.clamp(1. - clip, 1. + clip) * advantages
+
+        action_entropy = calc_entropy(prob) # encourage exploration
+        policy_loss = torch.min(surr1, surr2) - self.actor_beta_s * action_entropy
+
+        return policy_loss
 
     def learn(
         self,
-        memories: list[Memory]
+        memories: Memories
+
     ) -> tuple[Scalar, ...]:
 
         raise NotImplementedError
 
     def forward(
         self,
-        world_model: WorldModel
+        world_model: WorldModel,
+        init_state: FrameState
 
     ) -> tuple[
-        list[Memory],
-        Float['c h w']
+        Memories,
+        FrameState
     ]:
 
         assert world_model.image_size == self.actor.image_size and world_model.channels == self.actor.channels
