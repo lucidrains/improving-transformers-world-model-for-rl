@@ -43,6 +43,9 @@ class Actor(Module):
         init_conv_kernel = 7
     ):
         super().__init__()
+        self.image_size = image_size
+        self.channels = channels
+
         dim_hidden = int(expansion_factor * dim)
 
         self.proj_in = nn.Conv2d(channels, dim, init_conv_kernel, stride = 2, padding = init_conv_kernel // 2)
@@ -61,7 +64,7 @@ class Actor(Module):
         self.layers = ModuleList(layers)
 
         self.to_actions_pred = nn.Sequential(
-            Reduce('b c h w -> b c'),
+            Reduce('b c h w -> b c', 'mean'),
             nn.Linear(dim, num_actions),
         )
 
@@ -98,6 +101,9 @@ class Critic(Module):
         )
     ):
         super().__init__()
+        self.image_size = image_size
+        self.channels = channels
+
         dim_hidden = int(expansion_factor * dim)
 
         self.proj_in = nn.Conv2d(channels, dim, init_conv_kernel, stride = 2, padding = init_conv_kernel // 2)
@@ -115,7 +121,7 @@ class Critic(Module):
 
         self.layers = ModuleList(layers)
 
-        self.pool = Reduce('b c h w -> b c')
+        self.pool = Reduce('b c h w -> b c', 'mean')
 
         self.to_value_pred = HLGaussLayer(
             dim = dim,
@@ -144,12 +150,14 @@ class Critic(Module):
 
 # memory
 
+Scalar = Float['']
+
 class Memory(NamedTuple):
     state:           Float['c h w']
     action:          Int['a']
-    action_log_prob: Float['']
-    reward:          Float['']
-    value:           Float['']
+    action_log_prob: Scalar
+    reward:          Scalar
+    value:           Scalar
     done:            Bool['']
 
 # actor critic agent
@@ -171,15 +179,24 @@ class Agent(Module):
         self.actor = actor
         self.critic = critic
 
+        assert actor.image_size == critic.image_size and actor.channels == critic.channels
+
     def learn(
         self,
         memories: list[Memory]
-    ):
+    ) -> tuple[Scalar, ...]:
+
         raise NotImplementedError
 
     def forward(
         self,
         world_model: WorldModel
-    ) -> list[Memory]:
+
+    ) -> tuple[
+        list[Memory],
+        Float['c h w']
+    ]:
+
+        assert world_model.image_size == self.actor.image_size and world_model.channels == self.actor.channels
 
         raise NotImplementedError

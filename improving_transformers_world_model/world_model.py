@@ -509,6 +509,9 @@ class WorldModel(Module):
     ):
         super().__init__()
 
+        self.image_size = image_size
+        self.channels = channels
+
         assert divisible_by(image_size, patch_size)
 
         self.state_to_patches = Rearrange('b c t (h p1) (w p2) -> b t h w (p1 p2 c)', p1 = patch_size, p2 = patch_size)
