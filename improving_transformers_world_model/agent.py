@@ -4,7 +4,6 @@ from typing import NamedTuple
 import torch
 from torch import nn, cat, tensor, Tensor
 from torch.nn import Module, ModuleList
-from torch.distributions import Categorical
 
 import torch.nn.functional as F
 
@@ -35,6 +34,19 @@ def default(v, d):
 
 def log(t, eps = 1e-20):
     return torch.log(t.clamp(min = eps))
+
+def gumbel_noise(t):
+    noise = torch.zeros_like(t).uniform_(0, 1)
+    return -log(-log(noise))
+
+def gumbel_sample(t, temperature = 1., dim = -1):
+    return ((t / max(temperature, 1e-10)) + gumbel_noise(t)).argmax(dim = dim)
+
+def get_log_prob(logits, indices):
+    log_probs = logits.log_softmax(dim = -1)
+    indices = rearrange(indices, '... -> ... 1')
+    sel_log_probs = log_probs.gather(-1, indices)
+    return rearrange(sel_log_probs, '... 1 -> ...')
 
 def calc_entropy(prob, eps = 1e-20, dim = -1):
     return -(prob * log(prob, eps)).sum(dim = dim)
@@ -100,13 +112,9 @@ class Actor(Module):
         if not sample_action:
             return action_logits
 
-        prob = action_logits.softmax(dim = -1)
+        actions = gumbel_sample(action_logits, dim = -1)
 
-        distrib = Categorical(prob)
-
-        actions = distrib.sample()
-
-        log_probs = distrib.log_prob(actions)
+        log_probs = get_log_prob(action_logits, actions)
 
         return (actions, log_probs)
 
