@@ -51,6 +51,28 @@ def get_log_prob(logits, indices):
 def calc_entropy(prob, eps = 1e-20, dim = -1):
     return -(prob * log(prob, eps)).sum(dim = dim)
 
+# generalized advantage estimate
+
+def calc_gae(
+    rewards: Float['n'],
+    values: Float['n+1'],
+    masks: Bool['n'],
+    gamma = 0.99,
+    lam = 0.95
+) -> Float['n']:
+
+    device = rewards.device
+
+    gae = 0.
+    returns = torch.empty_like(rewards)
+
+    for i in reversed(range(len(rewards))):
+        delta = rewards[i] + gamma * values[i + 1] * masks[i] - values[i]
+        gae = delta + gamma * lam * masks[i] * gae
+        returns[i] = gae + values[i]
+
+    return returns
+
 # classes
 
 class Actor(Module):
