@@ -263,8 +263,7 @@ class Agent(Module):
         action_logits = self.actor(state)
         prob = action_logits.softmax(dim = -1)
 
-        distrib = Categorical(prob)
-        log_probs = distrib.log_prob(actions)
+        log_probs = get_log_prob(action_logits, actions)
 
         ratios = (log_probs - old_log_probs).exp()
 
