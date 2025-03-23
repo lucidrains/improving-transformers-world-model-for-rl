@@ -2,10 +2,11 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import torch
-from torch import nn, cat, tensor, Tensor
+from torch import nn, cat, stack, tensor, Tensor
 from torch.nn import Module, ModuleList
 
 import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
 
 from einops import rearrange
 from einops.layers.torch import Reduce
@@ -288,11 +289,43 @@ class Agent(Module):
         critic_loss = self.critic(state, returns)
         return critic_loss
 
+    @torch.no_grad()
     def learn(
         self,
-        memories: Memories
+        memories: Memories,
+        next_state: FrameState,
+        lam = 0.95,
+        gamma = 0.99,
+        batch_size = 16
 
     ) -> tuple[Loss, ...]:
+
+        next_state = rearrange(next_state, 'c 1 h w -> 1 c h w')
+
+        next_value = self.critic(next_state)
+
+        next_value = rearrange(next_value, '1 ... -> ...')
+
+        (
+            states,
+            actions,
+            action_log_probs,
+            rewards,
+            values,
+            dones
+        ) = [stack(tensors) for tensors in zip(*memories)]
+
+        values_with_next = cat((values, rearrange(next_value, '... -> 1 ...')), dim = 0)
+
+        # generalized advantage estimate
+
+        returns = calc_gae(rewards, values_with_next, dones, lam = lam, gamma = gamma)
+
+        # memories dataset for updating actor and critic learning
+
+        dataset = TensorDataset(states, actions, action_log_probs, returns, values, dones)
+
+        dataloader = DataLoader(dataset, batch_size = batch_size, shuffle = True)
 
         raise NotImplementedError
 
