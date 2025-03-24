@@ -6,7 +6,7 @@ from torch import nn, cat, stack, tensor, Tensor
 from torch.nn import Module, ModuleList
 
 import torch.nn.functional as F
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, ConcatDataset, DataLoader
 
 from einops import rearrange
 from einops.layers.torch import Reduce
@@ -221,7 +221,9 @@ class Memory(NamedTuple):
     value:           Scalar
     done:            Bool['']
 
-Memories = list[Memory]
+class MemoriesWithNextState(NamedTuple):
+    memories: list[Memory]
+    next_state: FrameState
 
 # actor critic agent
 
@@ -292,40 +294,50 @@ class Agent(Module):
     @torch.no_grad()
     def learn(
         self,
-        memories: Memories,
-        next_state: FrameState,
+        memories: MemoriesWithNextState | list[MemoriesWithNextState],
         lam = 0.95,
         gamma = 0.99,
         batch_size = 16
 
     ) -> tuple[Loss, ...]:
 
-        next_state = rearrange(next_state, 'c 1 h w -> 1 c h w')
+        if isinstance(memories, MemoriesWithNextState):
+            memories = [memories]
 
-        next_value = self.critic(next_state)
+        datasets = []
 
-        next_value = rearrange(next_value, '1 ... -> ...')
+        for one_memories, next_state in memories:
+            print(len(one_memories))
+            next_state = rearrange(next_state, 'c 1 h w -> 1 c h w')
 
-        (
-            states,
-            actions,
-            action_log_probs,
-            rewards,
-            values,
-            dones
-        ) = [stack(tensors) for tensors in zip(*memories)]
+            next_value = self.critic(next_state)
 
-        values_with_next = cat((values, rearrange(next_value, '... -> 1 ...')), dim = 0)
+            next_value = rearrange(next_value, '1 ... -> ...')
 
-        # generalized advantage estimate
+            (
+                states,
+                actions,
+                action_log_probs,
+                rewards,
+                values,
+                dones
+            ) = map(stack, zip(*one_memories))
 
-        returns = calc_gae(rewards, values_with_next, dones, lam = lam, gamma = gamma)
+            values_with_next = cat((values, rearrange(next_value, '... -> 1 ...')), dim = 0)
 
-        # memories dataset for updating actor and critic learning
+            # generalized advantage estimate
 
-        dataset = TensorDataset(states, actions, action_log_probs, returns, values, dones)
+            returns = calc_gae(rewards, values_with_next, dones, lam = lam, gamma = gamma)
 
-        dataloader = DataLoader(dataset, batch_size = batch_size, shuffle = True)
+            # memories dataset for updating actor and critic learning
+
+            dataset = TensorDataset(states, actions, action_log_probs, returns, values, dones)
+
+            datasets.append(dataset)
+
+        datasets = ConcatDataset(datasets)
+
+        dataloader = DataLoader(datasets, batch_size = batch_size, shuffle = True)
 
         raise NotImplementedError
 
@@ -337,10 +349,8 @@ class Agent(Module):
         memories: Memories | None = None,
         max_steps = float('inf')
 
-    ) -> tuple[
-        Memories,
-        FrameState
-    ]:
+    ) -> MemoriesWithNextState:
+
         device = init_state.device
 
         assert world_model.image_size == self.actor.image_size and world_model.channels == self.actor.channels
@@ -415,4 +425,4 @@ class Agent(Module):
 
         memories.extend(episode_memories)
 
-        return memories, next_state
+        return MemoriesWithNextState(memories, next_state)
