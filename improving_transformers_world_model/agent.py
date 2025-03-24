@@ -220,6 +220,7 @@ class Memory(NamedTuple):
     reward:          Scalar
     value:           Scalar
     done:            Bool['']
+    is_dream:        Bool['']
 
 class MemoriesWithNextState(NamedTuple):
     memories: list[Memory]
@@ -307,7 +308,7 @@ class Agent(Module):
         datasets = []
 
         for one_memories, next_state in memories:
-            print(len(one_memories))
+
             next_state = rearrange(next_state, 'c 1 h w -> 1 c h w')
 
             next_value = self.critic(next_state)
@@ -320,7 +321,8 @@ class Agent(Module):
                 action_log_probs,
                 rewards,
                 values,
-                dones
+                dones,
+                _
             ) = map(stack, zip(*one_memories))
 
             values_with_next = cat((values, rearrange(next_value, '... -> 1 ...')), dim = 0)
@@ -413,6 +415,7 @@ class Agent(Module):
         rewards = rewards[:-1]
         values = values[:-1]
         dones = dones[:-1]
+        is_dream = torch.ones_like(dones).bool()
 
         episode_memories = tuple(Memory(*timestep_tensors) for timestep_tensors in zip(
             rearrange(states, 'c t h w -> t c h w'),
@@ -420,7 +423,8 @@ class Agent(Module):
             action_log_probs,
             rewards,
             values,
-            dones
+            dones,
+            is_dream
         ))
 
         memories.extend(episode_memories)
