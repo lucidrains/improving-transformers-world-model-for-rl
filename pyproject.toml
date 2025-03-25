@@ -25,6 +25,7 @@ classifiers=[
 ]
 
 dependencies = [
+    "adam-atan2-pytorch>=0.1.18",
     "einx>=0.3.0",
     "einops>=0.8.0",
     "hl-gauss-pytorch>=0.1.16",

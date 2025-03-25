@@ -51,3 +51,5 @@ def test_agent():
     )
 
     memories = agent(world_model, state[0, :, 0], max_steps = 5)
+
+    agent.learn(memories)

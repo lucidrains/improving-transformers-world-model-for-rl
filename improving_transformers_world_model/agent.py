@@ -23,6 +23,8 @@ from improving_transformers_world_model.tensor_typing import (
 
 from hl_gauss_pytorch import HLGaussLayer
 
+from adam_atan2_pytorch import AdoptAtan2
+
 # helper functions
 
 def exists(v):
@@ -235,6 +237,11 @@ class Agent(Module):
         critic: Critic | dict,
         actor_eps_clip = 0.2, # clipping
         actor_beta_s = .01,   # entropy weight
+        optim_klass = AdoptAtan2,
+        actor_lr = 1e-4,
+        critic_lr = 1e-4,
+        actor_optim_kwargs: dict = dict(),
+        critic_optim_kwargs: dict = dict(),
     ):
         super().__init__()
 
@@ -252,19 +259,24 @@ class Agent(Module):
 
         assert actor.image_size == critic.image_size and actor.channels == critic.channels
 
+        self.actor_optim = optim_klass(actor.parameters(), lr = actor_lr, **actor_optim_kwargs)
+        self.critic_optim = optim_klass(critic.parameters(), lr = actor_lr, **actor_optim_kwargs)
+
     def policy_loss(
         self,
-        state: Float['b c h w'],
+        states: Float['b c h w'],
         actions: Int['b'],
         old_log_probs: Float['b'],
         values: Float['b'],
         returns: Float['b'],
     ) -> Loss:
 
+        self.actor.train()
+
         batch = values.shape[0]
         advantages = F.layer_norm(returns - values, (batch,))
 
-        action_logits = self.actor(state)
+        action_logits = self.actor(states)
         prob = action_logits.softmax(dim = -1)
 
         log_probs = get_log_prob(action_logits, actions)
@@ -285,20 +297,22 @@ class Agent(Module):
 
     def critic_loss(
         self,
-        state: Float['b c h w'],
+        states: Float['b c h w'],
         returns: Float['b']
     ) -> Loss:
 
-        critic_loss = self.critic(state, returns)
+        self.critic.train()
+
+        critic_loss = self.critic(states, returns)
         return critic_loss
 
-    @torch.no_grad()
     def learn(
         self,
         memories: MemoriesWithNextState | list[MemoriesWithNextState],
         lam = 0.95,
         gamma = 0.99,
-        batch_size = 16
+        batch_size = 16,
+        epochs = 2
 
     ) -> tuple[Loss, ...]:
 
@@ -309,11 +323,14 @@ class Agent(Module):
 
         for one_memories, next_state in memories:
 
-            next_state = rearrange(next_state, 'c 1 h w -> 1 c h w')
+            with torch.no_grad():
+                self.critic.eval()
 
-            next_value = self.critic(next_state)
+                next_state = rearrange(next_state, 'c 1 h w -> 1 c h w')
 
-            next_value = rearrange(next_value, '1 ... -> ...')
+                next_value = self.critic(next_state)
+
+                next_value = rearrange(next_value, '1 ... -> ...')
 
             (
                 states,
@@ -337,11 +354,44 @@ class Agent(Module):
 
             datasets.append(dataset)
 
+        # dataset and dataloader
+
         datasets = ConcatDataset(datasets)
 
         dataloader = DataLoader(datasets, batch_size = batch_size, shuffle = True)
 
-        raise NotImplementedError
+        # training
+
+        for epoch in range(epochs):
+
+            for states, actions, action_log_probs, returns, values, dones in dataloader:
+
+                # update actor
+
+                actor_loss = self.policy_loss(
+                    states = states,
+                    actions = actions,
+                    old_log_probs = action_log_probs,
+                    values = values,
+                    returns = returns
+                )
+
+                actor_loss.backward()
+
+                self.actor_optim.step()
+                self.actor_optim.zero_grad()
+
+                # update critic
+
+                critic_loss = self.critic_loss(
+                    states = states,
+                    returns = returns
+                )
+
+                critic_loss.backward()
+
+                self.critic_optim.step()
+                self.critic_optim.zero_grad()
 
     @torch.no_grad()
     def forward(
@@ -419,7 +469,7 @@ class Agent(Module):
 
         episode_memories = tuple(Memory(*timestep_tensors) for timestep_tensors in zip(
             rearrange(states, 'c t h w -> t c h w'),
-            actions,
+            rearrange(actions, '... 1 -> ...'), # fix for multi-actions later
             action_log_probs,
             rewards,
             values,
