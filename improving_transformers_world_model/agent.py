@@ -222,11 +222,11 @@ class Memory(NamedTuple):
     reward:          Scalar
     value:           Scalar
     done:            Bool['']
-    is_dream:        Bool['']
 
 class MemoriesWithNextState(NamedTuple):
-    memories: list[Memory]
-    next_state: FrameState
+    memories:         list[Memory]
+    next_state:       FrameState
+    from_real_env:    bool
 
 # actor critic agent
 
@@ -327,7 +327,7 @@ class Agent(Module):
 
         datasets = []
 
-        for one_memories, next_state in memories:
+        for one_memories, next_state, from_real_env in memories:
 
             with torch.no_grad():
                 self.critic.eval()
@@ -345,7 +345,6 @@ class Agent(Module):
                 rewards,
                 values,
                 dones,
-                _
             ) = map(stack, zip(*one_memories))
 
             values_with_next = cat((values, rearrange(next_value, '... -> 1 ...')), dim = 0)
@@ -470,7 +469,6 @@ class Agent(Module):
         rewards = rewards[:-1]
         values = values[:-1]
         dones = dones[:-1]
-        is_dream = torch.zeros_like(dones).bool()
 
         episode_memories = tuple(Memory(*timestep_tensors) for timestep_tensors in zip(
             rearrange(states, 'c t h w -> t c h w'),
@@ -479,12 +477,11 @@ class Agent(Module):
             rewards,
             values,
             dones,
-            is_dream
         ))
 
         memories.extend(episode_memories)
 
-        return MemoriesWithNextState(memories, next_state)
+        return MemoriesWithNextState(memories, next_state, from_real_env = True)
 
     @torch.no_grad()
     def forward(
@@ -558,7 +555,6 @@ class Agent(Module):
         rewards = rewards[:-1]
         values = values[:-1]
         dones = dones[:-1]
-        is_dream = torch.ones_like(dones).bool()
 
         episode_memories = tuple(Memory(*timestep_tensors) for timestep_tensors in zip(
             rearrange(states, 'c t h w -> t c h w'),
@@ -567,9 +563,8 @@ class Agent(Module):
             rewards,
             values,
             dones,
-            is_dream
         ))
 
         memories.extend(episode_memories)
 
-        return MemoriesWithNextState(memories, next_state)
+        return MemoriesWithNextState(memories, next_state, from_real_env = False)
