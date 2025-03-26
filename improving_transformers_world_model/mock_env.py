@@ -33,7 +33,7 @@ class Env(Module):
     def reset(
         self
     ) -> FrameState:
-        return torch.randn(self.state_space, device = self.device)
+        return torch.randn(self.state_shape, device = self.device)
 
     def forward(
         self,
@@ -45,6 +45,6 @@ class Env(Module):
     ]:
         state = torch.randn(self.state_shape, device = self.device)
         reward = torch.randn(1, device = self.device)
-        done = torch.zeros(1, device = self.device)
+        done = torch.randint(0, 2, (1,), device = self.device)
 
         return state, reward, done

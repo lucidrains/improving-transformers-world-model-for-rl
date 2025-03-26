@@ -5,6 +5,8 @@ from improving_transformers_world_model import (
     Agent
 )
 
+from improving_transformers_world_model.mock_env import Env
+
 def test_agent():
 
     # world model
@@ -50,6 +52,10 @@ def test_agent():
         )
     )
 
-    memories = agent(world_model, state[0, :, 0], max_steps = 5)
+    env = Env((3, 63, 63))
 
-    agent.learn(memories)
+    dream_memories = agent(world_model, state[0, :, 0], max_steps = 5)
+
+    real_memories = agent.interact_with_env(env, max_steps = 5)
+
+    agent.learn([dream_memories, real_memories])

@@ -262,6 +262,12 @@ class Agent(Module):
         self.actor_optim = optim_klass(actor.parameters(), lr = actor_lr, **actor_optim_kwargs)
         self.critic_optim = optim_klass(critic.parameters(), lr = actor_lr, **actor_optim_kwargs)
 
+        self.register_buffer('dummy', tensor(0))
+
+    @property
+    def device(self):
+        return self.dummy.device
+
     def policy_loss(
         self,
         states: Float['b c h w'],
@@ -376,7 +382,7 @@ class Agent(Module):
                     returns = returns
                 )
 
-                actor_loss.backward()
+                actor_loss.sum().backward()
 
                 self.actor_optim.step()
                 self.actor_optim.zero_grad()
@@ -388,10 +394,97 @@ class Agent(Module):
                     returns = returns
                 )
 
-                critic_loss.backward()
+                critic_loss.sum().backward()
 
                 self.critic_optim.step()
                 self.critic_optim.zero_grad()
+
+    @torch.no_grad()
+    def interact_with_env(
+        self,
+        env,
+        memories: Memories | None = None,
+        max_steps = float('inf')
+
+    ) -> MemoriesWithNextState:
+
+        device = self.device
+
+        memories = default(memories, [])
+
+        next_state = env.reset()
+
+        # prepare for looping with world model
+        # gathering up all the memories of states, actions, rewards for training
+
+        actions = torch.empty((1, 0, 1), device = device, dtype = torch.long)
+        action_log_probs = torch.empty((1, 0), device = device, dtype = torch.float32)
+
+        states = rearrange(next_state, 'c h w -> 1 c 1 h w')
+
+        rewards = torch.zeros((1, 1), device = device, dtype = torch.float32)
+        dones = tensor([[False]], device = device)
+
+        last_done = dones[0, -1]
+        time_step = states.shape[2] + 1
+
+        while time_step < max_steps and not last_done:
+
+            next_state = rearrange(next_state, 'c h w -> 1 c h w')
+
+            action, action_log_prob = self.actor(next_state, sample_action = True)
+
+            next_state, next_reward, next_done = env(action)
+
+            # extend growing memory
+
+            action = rearrange(action, '1 -> 1 1 1')
+            action_log_prob = rearrange(action_log_prob, '1 -> 1 1')
+
+            actions = cat((actions, action), dim = 1)
+            action_log_probs = cat((action_log_probs, action_log_prob), dim = 1)
+
+            next_state_to_append = rearrange(next_state, 'c h w -> 1 c 1 h w')
+            states = cat((states, next_state_to_append), dim = 2)
+
+            next_reward = rearrange(next_reward, '1 -> 1 1')
+            rewards = cat((rewards, next_reward), dim = -1)
+
+            next_done = rearrange(next_done, '1 -> 1 1')
+            dones = cat((dones, next_done), dim = -1)
+
+            time_step += 1
+            last_done = dones[0, -1]
+
+        # calculate value from critic all at once before storing to memory
+
+        values = self.critic(rearrange(states, '1 c t h w -> t c h w'))
+        values = rearrange(values, 't -> 1 t')
+
+        # move all intermediates to cpu and detach and store into memory for learning actor and critic
+
+        states, actions, action_log_probs, rewards, values, dones = tuple(rearrange(t, '1 ... -> ...').cpu() for t in (states, actions, action_log_probs, rewards, values, dones))
+
+        states, next_state = states[:, :-1], states[:, -1:]
+
+        rewards = rewards[:-1]
+        values = values[:-1]
+        dones = dones[:-1]
+        is_dream = torch.zeros_like(dones).bool()
+
+        episode_memories = tuple(Memory(*timestep_tensors) for timestep_tensors in zip(
+            rearrange(states, 'c t h w -> t c h w'),
+            rearrange(actions, '... 1 -> ...'), # fix for multi-actions later
+            action_log_probs,
+            rewards,
+            values,
+            dones,
+            is_dream
+        ))
+
+        memories.extend(episode_memories)
+
+        return MemoriesWithNextState(memories, next_state)
 
     @torch.no_grad()
     def forward(
