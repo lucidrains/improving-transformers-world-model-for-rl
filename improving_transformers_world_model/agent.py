@@ -285,6 +285,7 @@ class Agent(Module):
         optim_klass = AdoptAtan2,
         actor_lr = 1e-4,
         critic_lr = 1e-4,
+        max_grad_norm = 0.5,
         actor_optim_kwargs: dict = dict(),
         critic_optim_kwargs: dict = dict(),
     ):
@@ -301,6 +302,8 @@ class Agent(Module):
 
         self.actor_eps_clip = actor_eps_clip
         self.actor_beta_s = actor_beta_s
+
+        self.max_grad_norm = max_grad_norm
 
         assert actor.image_size == critic.image_size and actor.channels == critic.channels
 
@@ -428,6 +431,8 @@ class Agent(Module):
 
                 actor_loss.sum().backward()
 
+                nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+
                 self.actor_optim.step()
                 self.actor_optim.zero_grad()
 
@@ -439,6 +444,8 @@ class Agent(Module):
                 )
 
                 critic_loss.sum().backward()
+
+                nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
 
                 self.critic_optim.step()
                 self.critic_optim.zero_grad()
