@@ -33,6 +33,9 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+def divisible_by(num, den):
+    return (num % den) == 0
+
 # tensor helpers
 
 def log(t, eps = 1e-20):
@@ -75,6 +78,48 @@ def calc_gae(
         returns[i] = gae + values[i]
 
     return returns
+
+# symbol extractor
+# detailed in section C.3
+
+class SymbolExtractor(Module):
+    def __init__(
+        self,
+        *,
+        patch_size = 7,
+        channels = 3,
+        dim = 128,
+        dim_output = 145 * 17 # 145 images with 17 symbols per image (i think)
+    ):
+        super().__init__()
+        assert not divisible_by(patch_size, 2)
+
+        self.net = nn.Sequential(
+            nn.Conv2d(channels, dim, patch_size, stride = patch_size, padding = patch_size // 2),
+            nn.ReLU(),
+            nn.Conv2d(dim, dim, 1),
+            nn.ReLU(),
+            nn.Conv2d(dim, dim_output, 1)
+        )
+
+    def forward(
+        self,
+        images: Float['b c h w'],
+        labels: Int['b ph pw'] | Int['b phw'] | None = None
+    ):
+        logits = self.net(images)
+
+        return_loss = exists(labels)
+
+        if not return_loss:
+            return logits
+
+        loss = F.cross_entropy(
+            rearrange(logits, 'b l h w -> b l (h w)'),
+            rearrange(labels, 'b ph pw -> b (ph pw)')
+        )
+
+        return loss
 
 # classes
 
