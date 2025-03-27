@@ -1,6 +1,6 @@
 [project]
 name = "improving-transformers-world-model"
-version = "0.0.34"
+version = "0.0.35"
 description = "Improving Transformers World Model for RL"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -28,6 +28,7 @@ dependencies = [
     "adam-atan2-pytorch>=0.1.18",
     "einx>=0.3.0",
     "einops>=0.8.0",
+    "ema-pytorch>=0.7.7",
     "hl-gauss-pytorch>=0.1.16",
     "hyper-connections>=0.1.11",
     "jaxtyping",
@@ -35,7 +36,7 @@ dependencies = [
     "rotary-embedding-torch>=0.8.6",
     "torch>=2.2",
     "tqdm",
-    "vector-quantize-pytorch",
+    "vector-quantize-pytorch>=1.22.3",
 ]
 
 [project.urls]

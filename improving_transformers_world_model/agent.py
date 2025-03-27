@@ -25,6 +25,8 @@ from hl_gauss_pytorch import HLGaussLayer
 
 from adam_atan2_pytorch import AdoptAtan2
 
+from ema_pytorch import EMA
+
 # helper functions
 
 def exists(v):
@@ -288,6 +290,7 @@ class Agent(Module):
         max_grad_norm = 0.5,
         actor_optim_kwargs: dict = dict(),
         critic_optim_kwargs: dict = dict(),
+        critic_ema_kwargs: dict = dict()
     ):
         super().__init__()
 
@@ -299,6 +302,8 @@ class Agent(Module):
 
         self.actor = actor
         self.critic = critic
+
+        self.critic_ema = EMA(critic, **critic_ema_kwargs)
 
         self.actor_eps_clip = actor_eps_clip
         self.actor_beta_s = actor_beta_s
@@ -450,6 +455,8 @@ class Agent(Module):
                 self.critic_optim.step()
                 self.critic_optim.zero_grad()
 
+                self.critic_ema.update()
+
     @torch.no_grad()
     def interact_with_env(
         self,
@@ -595,7 +602,7 @@ class Agent(Module):
 
         # calculate value from critic all at once before storing to memory
 
-        values = self.critic(rearrange(states, '1 c t h w -> t c h w'))
+        values = self.critic_ema(rearrange(states, '1 c t h w -> t c h w'))
         values = rearrange(values, 't -> 1 t')
 
         # move all intermediates to cpu and detach and store into memory for learning actor and critic
