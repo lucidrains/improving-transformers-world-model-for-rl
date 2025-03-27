@@ -262,7 +262,8 @@ class BlockCausalAttention(Module):
         block_size,
         heads = 8,
         dim_head = 64,
-        accept_value_residual = False
+        accept_value_residual = False,
+        dropout = 0.1
     ):
         super().__init__()
         self.norm = nn.RMSNorm(dim)
@@ -282,6 +283,11 @@ class BlockCausalAttention(Module):
         # rope
 
         self.rotary_emb = RotaryEmbedding(dim_head)
+
+        # dropout
+
+        self.dropout = nn.Dropout(dropout)
+        self.dropout_p = dropout # for flex attention
 
         # value residual learning
 
@@ -335,7 +341,14 @@ class BlockCausalAttention(Module):
         assert xnor(exists(value_residual), self.accept_value_residual)
 
         if not is_inferencing and exists(flex_attn_block_mask):
-            out = flex_attention(q, k, v, block_mask = flex_attn_block_mask)
+
+            dropout_p = self.dropout_p if self.training else 0.
+
+            out = flex_attention(
+                q, k, v,
+                dropout_p = dropout_p,
+                block_mask = flex_attn_block_mask
+            )
         else:
             # block causal mask
 
@@ -347,6 +360,7 @@ class BlockCausalAttention(Module):
                 sim = sim.masked_fill(~block_causal_mask, -torch.finfo(sim.dtype).max)
 
             attn = sim.softmax(dim = -1)
+            attn = self.dropout(attn)
 
             out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
 
@@ -362,7 +376,8 @@ class SwiGLUFeedForward(Module):
     def __init__(
         self,
         dim,
-        expand_factor = 4.
+        expand_factor = 4.,
+        dropout = 0.1
     ):
         super().__init__()
         self.norm = nn.RMSNorm(dim)
@@ -371,11 +386,15 @@ class SwiGLUFeedForward(Module):
         self.proj_in = Linear(dim, dim_hidden * 2)
         self.proj_out = Linear(dim_hidden, dim)
 
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self, x):
         x = self.norm(x)
 
         x, gates = self.proj_in(x).chunk(2, dim = -1)
         x = x * F.gelu(gates)
+
+        x = self.dropout(x)
 
         return self.proj_out(x)
 
@@ -392,7 +411,9 @@ class BlockCausalTransformer(Module):
         heads = 8,
         ff_expand_factor = 4.,
         num_residual_streams = 4,
-        use_flex_attn = False
+        use_flex_attn = False,
+        dropout_attn = 0.1,
+        dropout_ff = 0.1
     ):
         super().__init__()
         self.dim = dim
@@ -413,8 +434,8 @@ class BlockCausalTransformer(Module):
         for i in range(depth):
             is_first = i == 0
 
-            attn = BlockCausalAttention(dim = dim, dim_head = dim_head, heads = heads, block_size = block_size, accept_value_residual = not is_first)
-            ff = SwiGLUFeedForward(dim = dim, expand_factor = ff_expand_factor)
+            attn = BlockCausalAttention(dim = dim, dim_head = dim_head, heads = heads, block_size = block_size, accept_value_residual = not is_first, dropout = dropout_attn)
+            ff = SwiGLUFeedForward(dim = dim, expand_factor = ff_expand_factor, dropout = dropout_ff)
 
             layers.append(ModuleList([
                 init_hyper_conn(branch = attn),
@@ -505,7 +526,8 @@ class WorldModel(Module):
             sigma_to_bin_ratio = 1. # amount of label smoothing
         ),
         is_terminal_loss_weight = 1.,
-        reward_loss_weight = 1.
+        reward_loss_weight = 1.,
+        dropout_embed = 0.1,
     ):
         super().__init__()
 
@@ -578,6 +600,10 @@ class WorldModel(Module):
             num_bins = reward_num_bins,
             **hl_gauss_loss_kwargs
         ) if can_pred_reward else None
+
+        # dropouts
+
+        self.dropout_embed = nn.Dropout(dropout_embed)
 
         # loss related
 
@@ -728,7 +754,11 @@ class WorldModel(Module):
             tokens = self.tokenizer.codes_from_indices(token_ids)
             tokens = self.proj_in(tokens)
 
-        # maybe reward cnoditioning
+        # state embed dropout
+
+        tokens = self.dropout_embed(tokens)
+
+        # maybe reward conditioning
 
         if exists(rewards):
             reward_embeds = self.to_reward_embed(rewards)
