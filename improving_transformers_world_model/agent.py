@@ -3,7 +3,7 @@ from typing import NamedTuple
 
 import torch
 from torch import nn, cat, stack, tensor, Tensor
-from torch.nn import Module, ModuleList
+from torch.nn import Module, ModuleList, GRU
 
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, ConcatDataset, DataLoader
@@ -37,6 +37,9 @@ def default(v, d):
 
 def divisible_by(num, den):
     return (num % den) == 0
+
+def is_odd(num):
+    return not divisible_by(num, 2)
 
 # tensor helpers
 
@@ -94,7 +97,7 @@ class SymbolExtractor(Module):
         dim_output = 145 * 17 # 145 images with 17 symbols per image (i think)
     ):
         super().__init__()
-        assert not divisible_by(patch_size, 2)
+        assert is_odd(patch_size)
 
         self.net = nn.Sequential(
             nn.Conv2d(channels, dim, patch_size, stride = patch_size, padding = patch_size // 2),
@@ -124,6 +127,53 @@ class SymbolExtractor(Module):
         return loss
 
 # classes
+
+class ImpalaCNN(Module):
+    def __init__(
+        self,
+        *,
+        dims = (64, 64, 128),
+        image_size = 63,
+        channels = 3,
+        init_conv_kernel = 7
+    ):
+        super().__init__()
+        assert is_odd(init_conv_kernel)
+
+        first_dim, *_ = dims
+
+        self.init_conv = nn.Conv2d(channels, first_dim, init_conv_kernel, stride = init_conv_kernel)
+        self.max_pool = nn.MaxPool2d(kernel_size = 3, stride = 2)
+
+        layers = ModuleList([])
+
+        dim_pairs = zip(dims[:-1], dims[1:])
+
+        for dim_in, dim_out in dim_pairs:
+
+            residual_fn = nn.Conv2d(dim_in, dim_out, 1) if dim_in != dim_out else nn.Identity()
+
+            layer = nn.Sequential(
+                nn.InstanceNorm2d(dim_in),
+                nn.ReLU(),
+                nn.Conv2d(dim_in, dim_out, 3, padding = 1),
+            )
+
+            layers.append(ModuleList([residual_fn, layer]))
+
+        self.layers = layers
+
+    def forward(
+        self,
+        state: Float['b c h w']
+    ):
+        x = self.init_conv(state)
+        x = self.max_pool(x)
+
+        for residual_fn, layer_fn in self.layers:
+            x = layer_fn(x) + residual_fn(x)
+
+        return rearrange(x, 'b d h w -> b (h w d)')
 
 class Actor(Module):
     def __init__(
