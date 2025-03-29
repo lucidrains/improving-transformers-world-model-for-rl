@@ -1,6 +1,6 @@
 [project]
 name = "improving-transformers-world-model"
-version = "0.0.36"
+version = "0.0.37"
 description = "Improving Transformers World Model for RL"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }

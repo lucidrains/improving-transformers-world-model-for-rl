@@ -8,7 +8,7 @@ from torch.nn import Module, ModuleList, GRU
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, ConcatDataset, DataLoader
 
-from einops import rearrange
+from einops import rearrange, pack, unpack
 from einops.layers.torch import Reduce
 
 from improving_transformers_world_model.world_model import (
@@ -61,6 +61,15 @@ def get_log_prob(logits, indices):
 
 def calc_entropy(prob, eps = 1e-20, dim = -1):
     return -(prob * log(prob, eps)).sum(dim = dim)
+
+def pack_one(t, pattern):
+    packed, ps = pack([t], pattern)
+
+    def inverse(out, inv_pattern = None):
+        inv_pattern = default(inv_pattern, pattern)
+        return unpack(out, ps, inv_pattern)[0]
+
+    return packed, inverse
 
 # generalized advantage estimate
 
@@ -128,19 +137,22 @@ class SymbolExtractor(Module):
 
 # classes
 
-class ImpalaCNN(Module):
+class Impala(Module):
     def __init__(
         self,
         *,
         dims = (64, 64, 128),
         image_size = 63,
         channels = 3,
-        init_conv_kernel = 7
+        init_conv_kernel = 7,
+        dim_rnn = 32,
+        dim_rnn_hidden = 32
     ):
         super().__init__()
         assert is_odd(init_conv_kernel)
+        assert len(dims) >= 2
 
-        first_dim, *_ = dims
+        first_dim, *_, last_dim = dims
 
         self.init_conv = nn.Conv2d(channels, first_dim, init_conv_kernel, stride = init_conv_kernel)
         self.max_pool = nn.MaxPool2d(kernel_size = 3, stride = 2)
@@ -163,17 +175,48 @@ class ImpalaCNN(Module):
 
         self.layers = layers
 
+        # they add a GRU to give the agent memory
+
+        self.to_rnn = nn.Linear(last_dim * (image_size // init_conv_kernel // 2) ** 2, dim_rnn)
+
+        self.rnn = nn.GRU(dim_rnn, dim_rnn_hidden, batch_first = True)
+
     def forward(
         self,
-        state: Float['b c h w']
+        state: Float['b c h w'] | Float['b c t h w'],
+        gru_hidden = None
     ):
+        is_image = state.ndim == 4
+
+        if is_image:
+            state = rearrange(state, 'b c h w -> b c 1 h w')
+
+        state = rearrange(state, 'b c t h w -> b t c h w')
+        state, inverse_pack_time = pack_one(state, '* c h w')
+
+        # impala cnn network
+
         x = self.init_conv(state)
         x = self.max_pool(x)
 
         for residual_fn, layer_fn in self.layers:
             x = layer_fn(x) + residual_fn(x)
 
-        return rearrange(x, 'b d h w -> b (h w d)')
+        # fold height and width into feature dimension
+
+        cnn_out = rearrange(x, 'b d h w -> b (h w d)')
+
+        # get back the time dimension for rnn
+
+        cnn_out = inverse_pack_time(cnn_out, '* d')
+
+        rnn_input = self.to_rnn(cnn_out)
+
+        rnn_out, next_gru_hidden = self.rnn(rnn_input, gru_hidden)
+
+        return cnn_out, rnn_out, next_gru_hidden
+
+# actor and critic mlps
 
 class Actor(Module):
     def __init__(
