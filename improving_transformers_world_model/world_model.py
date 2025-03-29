@@ -197,6 +197,8 @@ class NearestNeighborTokenizer(Module):
         self,
         x: Float['b *dims d'],
         ignore_dist_threshold = None,
+        freeze = False
+
     ) -> Int['b *dims']:
 
         ignore_dist_threshold = default(ignore_dist_threshold, not self.training or self.is_at_max_codes)
@@ -231,7 +233,7 @@ class NearestNeighborTokenizer(Module):
 
         # early return if not training
 
-        if not self.training:
+        if freeze or not self.training:
             return inverse_pack_one(nearest_neighbor_ids)
 
         # if any observations are outside of distance threshold, need to set the new codes
@@ -723,7 +725,8 @@ class WorldModel(Module):
         cache = None,
         return_cache = False,
         return_loss = True,
-        return_loss_breakdown = False
+        return_loss_breakdown = False,
+        freeze_tokenizer = True
     ):
 
         assert xnor(exists(rewards), self.can_pred_reward)
@@ -732,7 +735,7 @@ class WorldModel(Module):
         if state_or_token_ids.dtype  == torch.float:
             patches = self.state_to_patches(state_or_token_ids)
 
-            token_ids = self.tokenizer(patches)
+            token_ids = self.tokenizer(patches, freeze = freeze_tokenizer)
         else:
             token_ids = state_or_token_ids
 
