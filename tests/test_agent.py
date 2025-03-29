@@ -39,16 +39,16 @@ def test_agent():
     # agent
 
     agent = Agent(
-        actor = dict(
-            dim = 32,
-            num_actions = 5,
+        impala = dict(
             image_size = 63,
             channels = 3
         ),
+        actor = dict(
+            dim = 32,
+            num_actions = 5,
+        ),
         critic = dict(
             dim = 64,
-            image_size = 63,
-            channels = 3,
         )
     )
 

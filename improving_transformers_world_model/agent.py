@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import NamedTuple
+from typing import NamedTuple, Deque
+from collections import deque
 
 import torch
 from torch import nn, cat, stack, tensor, Tensor
@@ -177,14 +178,19 @@ class Impala(Module):
 
         # they add a GRU to give the agent memory
 
-        self.to_rnn = nn.Linear(last_dim * (image_size // init_conv_kernel // 2) ** 2, dim_rnn)
+        impala_ccn_output_dim = last_dim * (image_size // init_conv_kernel // 2) ** 2
+
+        self.to_rnn = nn.Linear(impala_ccn_output_dim, dim_rnn)
 
         self.rnn = nn.GRU(dim_rnn, dim_rnn_hidden, batch_first = True)
+
+        self.output_dims = (impala_ccn_output_dim, dim_rnn)
 
     def forward(
         self,
         state: Float['b c h w'] | Float['b c t h w'],
-        gru_hidden = None
+        gru_hidden = None,
+        concat_cnn_rnn_outputs = True
     ):
         is_image = state.ndim == 4
 
@@ -214,49 +220,50 @@ class Impala(Module):
 
         rnn_out, next_gru_hidden = self.rnn(rnn_input, gru_hidden)
 
-        return cnn_out, rnn_out, next_gru_hidden
+        # remove the time dimension if single image frame passed in
+
+        if is_image:
+            rnn_out = rearrange(rnn_out, 'b 1 d -> b d')
+            cnn_out = rearrange(cnn_out, 'b 1 d -> b d')
+
+        if not concat_cnn_rnn_outputs:
+            return cnn_out, rnn_out, next_gru_hidden
+
+        return cat((cnn_out, rnn_out), dim = -1), next_gru_hidden
 
 # actor and critic mlps
 
 class Actor(Module):
     def __init__(
         self,
+        dim_input,
         dim,
         *,
-        image_size,
-        channels,
         num_actions,
         num_layers = 3,
         expansion_factor = 2.,
-        init_conv_kernel = 7
     ):
         super().__init__()
         self.num_actions = num_actions
 
-        self.image_size = image_size
-        self.channels = channels
-
         dim_hidden = int(expansion_factor * dim)
 
-        self.proj_in = nn.Conv2d(channels, dim, init_conv_kernel, stride = 2, padding = init_conv_kernel // 2)
+        self.proj_in = nn.Linear(dim_input, dim)
 
         layers = []
 
         for _ in range(num_layers):
             layer = nn.Sequential(
-                nn.Conv2d(dim, dim_hidden, 3, padding = 1),
+                nn.Linear(dim, dim_hidden),
                 nn.ReLU(),
-                nn.Conv2d(dim_hidden, dim, 3, padding = 1),
+                nn.Linear(dim_hidden, dim),
             )
 
             layers.append(layer)
 
         self.layers = ModuleList(layers)
 
-        self.to_actions_pred = nn.Sequential(
-            Reduce('b c h w -> b c', 'mean'),
-            nn.Linear(dim, num_actions),
-        )
+        self.to_actions_pred = nn.Linear(dim, num_actions)
 
     def forward(
         self,
@@ -286,13 +293,11 @@ class Actor(Module):
 class Critic(Module):
     def __init__(
         self,
+        dim_input,
         dim,
         *,
-        image_size,
-        channels,
         num_layers = 4,
         expansion_factor = 2.,
-        init_conv_kernel = 7,
         use_regression = False,
         hl_gauss_loss_kwargs = dict(
             min_value = 0.,
@@ -302,27 +307,22 @@ class Critic(Module):
         )
     ):
         super().__init__()
-        self.image_size = image_size
-        self.channels = channels
-
         dim_hidden = int(expansion_factor * dim)
 
-        self.proj_in = nn.Conv2d(channels, dim, init_conv_kernel, stride = 2, padding = init_conv_kernel // 2)
+        self.proj_in = nn.Linear(dim_input, dim)
 
         layers = []
 
         for _ in range(num_layers):
             layer = nn.Sequential(
-                nn.Conv2d(dim, dim_hidden, 3, padding = 1),
+                nn.Linear(dim, dim_hidden),
                 nn.ReLU(),
-                nn.Conv2d(dim_hidden, dim, 3, padding = 1),
+                nn.Linear(dim_hidden, dim),
             )
 
             layers.append(layer)
 
         self.layers = ModuleList(layers)
-
-        self.pool = Reduce('b c h w -> b c', 'mean')
 
         self.to_value_pred = HLGaussLayer(
             dim = dim,
@@ -331,7 +331,7 @@ class Critic(Module):
 
     def forward(
         self,
-        state: Float['b c h w'],
+        state: Float['b n d'],
         returns: Float['b'] | None = None
 
     ) -> Float['b'] | Float['']:
@@ -341,8 +341,7 @@ class Critic(Module):
         for layer in self.layers:
             embed = layer(embed) + embed
 
-        pooled = self.pool(embed)
-        values = self.to_value_pred(pooled)
+        values = self.to_value_pred(embed)
 
         if not exists(returns):
             return values
@@ -364,7 +363,7 @@ class Memory(NamedTuple):
     done:            Bool['']
 
 class MemoriesWithNextState(NamedTuple):
-    memories:         list[Memory]
+    memories:         Deque[Memory]
     next_state:       FrameState
     from_real_env:    bool
 
@@ -373,6 +372,7 @@ class MemoriesWithNextState(NamedTuple):
 class Agent(Module):
     def __init__(
         self,
+        impala: Impala | dict,
         actor: Actor | dict,
         critic: Critic | dict,
         actor_eps_clip = 0.2, # clipping
@@ -383,16 +383,25 @@ class Agent(Module):
         max_grad_norm = 0.5,
         actor_optim_kwargs: dict = dict(),
         critic_optim_kwargs: dict = dict(),
-        critic_ema_kwargs: dict = dict()
+        critic_ema_kwargs: dict = dict(),
+        max_memories = 128_000
     ):
         super().__init__()
 
+        if isinstance(impala, dict):
+            impala = Impala(**impala)
+
+        dim_state = sum(impala.output_dims)
+
         if isinstance(actor, dict):
+            actor.update(dim_input = dim_state)
             actor = Actor(**actor)
 
         if isinstance(critic, dict):
+            critic.update(dim_input = dim_state)
             critic = Critic(**critic)
 
+        self.impala = impala
         self.actor = actor
         self.critic = critic
 
@@ -403,10 +412,12 @@ class Agent(Module):
 
         self.max_grad_norm = max_grad_norm
 
-        assert actor.image_size == critic.image_size and actor.channels == critic.channels
+        self.actor_optim = optim_klass((*actor.parameters(), *impala.parameters()), lr = actor_lr, **actor_optim_kwargs)
+        self.critic_optim = optim_klass((*critic.parameters(), *impala.parameters()), lr = actor_lr, **actor_optim_kwargs)
 
-        self.actor_optim = optim_klass(actor.parameters(), lr = actor_lr, **actor_optim_kwargs)
-        self.critic_optim = optim_klass(critic.parameters(), lr = actor_lr, **actor_optim_kwargs)
+        # memories
+
+        self.max_memories = max_memories
 
         self.register_buffer('dummy', tensor(0))
 
@@ -428,7 +439,9 @@ class Agent(Module):
         batch = values.shape[0]
         advantages = F.layer_norm(returns - values, (batch,))
 
-        action_logits = self.actor(states)
+        actor_critic_input, _ = self.impala(states)
+        action_logits = self.actor(actor_critic_input)
+
         prob = action_logits.softmax(dim = -1)
 
         log_probs = get_log_prob(action_logits, actions)
@@ -455,7 +468,9 @@ class Agent(Module):
 
         self.critic.train()
 
-        critic_loss = self.critic(states, returns)
+        actor_critic_input, _ = self.impala(states)
+        critic_loss = self.critic(actor_critic_input, returns)
+
         return critic_loss
 
     def learn(
@@ -480,9 +495,8 @@ class Agent(Module):
 
                 next_state = rearrange(next_state, 'c 1 h w -> 1 c h w')
 
-                next_value = self.critic(next_state)
-
-                next_value = rearrange(next_value, '1 ... -> ...')
+                actor_critic_input, _ = self.impala(next_state)
+                next_value = self.critic(actor_critic_input)
 
             (
                 states,
@@ -491,9 +505,9 @@ class Agent(Module):
                 rewards,
                 values,
                 dones,
-            ) = map(stack, zip(*one_memories))
+            ) = map(stack, zip(*list(one_memories)))
 
-            values_with_next = cat((values, rearrange(next_value, '... -> 1 ...')), dim = 0)
+            values_with_next = cat((values, next_value), dim = 0)
 
             # generalized advantage estimate
 
@@ -583,11 +597,11 @@ class Agent(Module):
 
             next_state = rearrange(next_state, 'c h w -> 1 c h w')
 
-            action, action_log_prob = self.actor(next_state, sample_action = True)
+            actor_critic_input, rnn_hidden = self.impala(next_state)
+
+            action, action_log_prob = self.actor(actor_critic_input, sample_action = True)
 
             next_state, next_reward, next_done = env(action)
-
-            # extend growing memory
 
             action = rearrange(action, '1 -> 1 1 1')
             action_log_prob = rearrange(action_log_prob, '1 -> 1 1')
@@ -609,8 +623,9 @@ class Agent(Module):
 
         # calculate value from critic all at once before storing to memory
 
-        values = self.critic(rearrange(states, '1 c t h w -> t c h w'))
-        values = rearrange(values, 't -> 1 t')
+        actor_critic_input, _ = self.impala(states)
+
+        values = self.critic(actor_critic_input)
 
         # move all intermediates to cpu and detach and store into memory for learning actor and critic
 
@@ -647,10 +662,9 @@ class Agent(Module):
 
         device = init_state.device
 
-        assert world_model.image_size == self.actor.image_size and world_model.channels == self.actor.channels
         assert world_model.num_actions == self.actor.num_actions
 
-        memories = default(memories, [])
+        memories = default(memories, deque([], maxlen = self.max_memories))
 
         next_state = rearrange(init_state, 'c h w -> 1 c h w')
 
@@ -672,10 +686,12 @@ class Agent(Module):
 
         while time_step < max_steps and not last_done:
 
-            action, action_log_prob = self.actor(next_state, sample_action = True)
+            actor_critic_input, rnn_hiddens = self.impala(next_state)
 
-            action_log_prob = rearrange(action_log_prob, 'b -> b 1')
+            action, action_log_prob = self.actor(actor_critic_input, sample_action = True)
+
             action = rearrange(action, 'b -> b 1 1')
+            action_log_prob = rearrange(action_log_prob, 'b -> b 1')
 
             actions = cat((actions, action), dim = 1)
             action_log_probs = cat((action_log_probs, action_log_prob), dim = 1)
@@ -695,8 +711,9 @@ class Agent(Module):
 
         # calculate value from critic all at once before storing to memory
 
-        values = self.critic_ema(rearrange(states, '1 c t h w -> t c h w'))
-        values = rearrange(values, 't -> 1 t')
+        actor_critic_input, _ = self.impala(states)
+
+        values = self.critic_ema(actor_critic_input)
 
         # move all intermediates to cpu and detach and store into memory for learning actor and critic
 
