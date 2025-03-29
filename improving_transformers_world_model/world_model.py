@@ -3,9 +3,10 @@ from __future__ import annotations
 from math import ceil
 
 import torch
-from torch import nn, tensor, cdist, cat
 import torch.nn.functional as F
+from torch import nn, tensor, is_tensor, cdist, cat
 from torch.nn import Module, ModuleList, Linear
+from torch.utils._pytree import tree_map, tree_flatten, tree_unflatten
 
 from vector_quantize_pytorch import VectorQuantize
 
@@ -59,6 +60,8 @@ def divisible_by(num, den):
 def xnor(x, y):
     return not (x ^ y)
 
+# tensor helpers
+
 def pack_one(t, pattern):
     return pack([t], pattern)
 
@@ -73,6 +76,9 @@ def pack_one_with_inverse(t, pattern, inv_pattern = None):
 
 def is_empty(t):
     return t.numel() == 0
+
+def cache_detach_(cache):
+    return tree_map(lambda t: t.detach_() if is_tensor(t) else t, cache)
 
 # sampling related
 
@@ -726,6 +732,7 @@ class WorldModel(Module):
         is_terminal: Bool['b t'] | None = None, # learn to predict the terminal state, for the agent interacting with the world model in MDP manner
         cache = None,
         return_cache = False,
+        detach_cache = False,
         return_loss = True,
         return_loss_breakdown = False,
         freeze_tokenizer = True
@@ -790,6 +797,9 @@ class WorldModel(Module):
         tokens, inverse_time = pack_one_with_inverse(tokens, 'b * d')
 
         embeds, next_cache = self.transformer(tokens, cache = cache, return_cache = True)
+
+        if detach_cache:
+            cache_detach_(next_cache)
 
         state_logits = self.to_state_pred(embeds)
 
@@ -861,7 +871,12 @@ class WorldModel(Module):
             (reward_loss * self.reward_loss_weight)
         )
 
-        if not return_loss_breakdown:
+        breakdown = (state_loss, reward_loss, is_terminal_loss)
+
+        if not return_loss_breakdown and not return_cache:
             return total_loss
 
-        return total_loss, (state_loss, reward_loss, is_terminal_loss)
+        if return_loss_breakdown and not return_cache:
+            return total_loss, breakdown
+
+        return total_loss, (breakdown, next_cache)
