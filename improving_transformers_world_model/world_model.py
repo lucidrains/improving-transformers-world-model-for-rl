@@ -688,7 +688,9 @@ class WorldModel(Module):
             # will sticky the action to the very last action for now
 
             if exists(actions):
-                actions = actions[:, -1:]
+                action = actions[:, -1:]
+
+                actions = cat((actions, action), dim = 1)
 
         self.train(was_training)
 
