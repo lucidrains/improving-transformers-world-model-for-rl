@@ -458,7 +458,8 @@ class BlockCausalTransformer(Module):
         self,
         tokens,
         cache = None,
-        return_cache = False
+        return_cache = False,
+        remove_cache_len_from_time = True
     ):
 
         seq_len = tokens.shape[1]
@@ -469,7 +470,7 @@ class BlockCausalTransformer(Module):
 
         # handle cache
 
-        if exists(cache):
+        if exists(cache) and remove_cache_len_from_time:
             cache_len = cache[0][0].shape[-2]
             tokens = tokens[:, cache_len:]
 
@@ -731,6 +732,7 @@ class WorldModel(Module):
         actions: Int['b t a'] | None = None, # values of < 0 as padding, allowing for multiple actions to be summed per timestep
         is_terminal: Bool['b t'] | None = None, # learn to predict the terminal state, for the agent interacting with the world model in MDP manner
         cache = None,
+        remove_cache_len_from_time = True,
         return_cache = False,
         detach_cache = False,
         return_loss = True,
@@ -794,20 +796,22 @@ class WorldModel(Module):
         # pack the spacetime dimension into one sequence for block causal attention
 
         tokens, inverse_space = pack_one_with_inverse(tokens, 'b t * d')
-        tokens, inverse_time = pack_one_with_inverse(tokens, 'b * d')
 
-        embeds, next_cache = self.transformer(tokens, cache = cache, return_cache = True)
+        flattened_space_dim = tokens.shape[-2]
+
+        def inverse_time(t):
+            return rearrange(t, 'b (t n) d -> b t n d', n = flattened_space_dim)
+
+        tokens = rearrange(tokens, 'b t n d-> b (t n) d')
+
+        embeds, next_cache = self.transformer(tokens, remove_cache_len_from_time = remove_cache_len_from_time, cache = cache, return_cache = True)
 
         if detach_cache:
             cache_detach_(next_cache)
 
         state_logits = self.to_state_pred(embeds)
 
-        if not is_inferencing:
-            state_logits = inverse_time(state_logits)
-        else:
-            state_logits = rearrange(state_logits, 'b n d -> b 1 n d')
-
+        state_logits = inverse_time(state_logits)
         state_logits = inverse_space(state_logits)
 
         # maybe pool embeds across space if predicting reward and terminal
