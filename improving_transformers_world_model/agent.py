@@ -400,7 +400,7 @@ class Agent(Module):
         critic_optim_kwargs: dict = dict(),
         critic_ema_kwargs: dict = dict(),
         max_memories = 128_000,
-        standardize_gae_momentum = 0.1
+        standardize_gae_momentum = 0.95
     ):
         super().__init__()
 
