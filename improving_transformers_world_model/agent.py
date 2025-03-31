@@ -76,7 +76,7 @@ def pack_one(t, pattern):
 
 # generalized advantage estimate
 
-def calc_gae(
+def calc_target_and_gae(
     rewards: Float['... n'],
     values: Float['... n+1'],
     masks: Bool['... n'],
@@ -84,7 +84,10 @@ def calc_gae(
     lam = 0.95,
     use_accelerated = None
 
-) -> Float['n']:
+) -> tuple[
+    Float['... n'],
+    Float['... n']
+]:
 
     use_accelerated = default(use_accelerated, rewards.is_cuda)
     device = rewards.device
@@ -107,7 +110,9 @@ def calc_gae(
 
     returns = gae + values
 
-    return inverse_pack(returns)
+    gae, returns = tuple(inverse_pack(t) for t in (gae, returns))
+
+    return returns, gae
 
 # symbol extractor
 # detailed in section C.3
@@ -400,7 +405,7 @@ class Agent(Module):
         critic_optim_kwargs: dict = dict(),
         critic_ema_kwargs: dict = dict(),
         max_memories = 128_000,
-        standardize_gae_momentum = 0.95
+        standardize_target_momentum = 0.95
     ):
         super().__init__()
 
@@ -431,11 +436,11 @@ class Agent(Module):
         self.actor_optim = optim_klass((*actor.parameters(), *impala.parameters()), lr = actor_lr, **actor_optim_kwargs)
         self.critic_optim = optim_klass((*critic.parameters(), *impala.parameters()), lr = actor_lr, **actor_optim_kwargs)
 
-        # use a batch norm for standardizing the GAE - section A.1.2 in paper
+        # use a batch norm for standardizing the target - section A.1.2 in paper
 
-        self.batchnorm_gae = nn.Sequential(
+        self.batchnorm_target = nn.Sequential(
             Rearrange('b -> b 1 1'),
-            nn.BatchNorm1d(1, momentum = standardize_gae_momentum, affine = False),
+            nn.BatchNorm1d(1, momentum = standardize_target_momentum, affine = False),
             Rearrange('b 1 1 -> b'),
         )
 
@@ -535,12 +540,7 @@ class Agent(Module):
 
             # generalized advantage estimate
 
-            returns = calc_gae(rewards, values_with_next, dones, lam = lam, gamma = gamma)
-
-            # normalize the returns to zero mean unit variance
-
-            if returns.numel() > 1:
-                returns = self.batchnorm_gae(returns)
+            returns, gae = calc_target_and_gae(rewards, values_with_next, dones, lam = lam, gamma = gamma)
 
             # memories dataset for updating actor and critic learning
 
@@ -556,9 +556,13 @@ class Agent(Module):
 
         # training
 
+        self.train()
+
         for epoch in range(epochs):
 
             for states, actions, action_log_probs, returns, values, dones in dataloader:
+
+                returns = self.batchnorm_target(returns)
 
                 # update actor
 
