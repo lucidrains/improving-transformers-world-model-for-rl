@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.utils.data import TensorDataset, ConcatDataset, DataLoader
 
 from einops import rearrange, pack, unpack
-from einops.layers.torch import Reduce
+from einops.layers.torch import Reduce, Rearrange
 
 from improving_transformers_world_model.associative_scan import AssocScan
 
@@ -399,7 +399,8 @@ class Agent(Module):
         actor_optim_kwargs: dict = dict(),
         critic_optim_kwargs: dict = dict(),
         critic_ema_kwargs: dict = dict(),
-        max_memories = 128_000
+        max_memories = 128_000,
+        standardize_gae_momentum = 0.1
     ):
         super().__init__()
 
@@ -429,6 +430,14 @@ class Agent(Module):
 
         self.actor_optim = optim_klass((*actor.parameters(), *impala.parameters()), lr = actor_lr, **actor_optim_kwargs)
         self.critic_optim = optim_klass((*critic.parameters(), *impala.parameters()), lr = actor_lr, **actor_optim_kwargs)
+
+        # use a batch norm for standardizing the GAE - section A.1.2 in paper
+
+        self.batchnorm_gae = nn.Sequential(
+            Rearrange('b -> b 1 1'),
+            nn.BatchNorm1d(1, momentum = standardize_gae_momentum, affine = False),
+            Rearrange('b 1 1 -> b'),
+        )
 
         # memories
 
@@ -527,6 +536,10 @@ class Agent(Module):
             # generalized advantage estimate
 
             returns = calc_gae(rewards, values_with_next, dones, lam = lam, gamma = gamma)
+
+            # normalize the returns to zero mean unit variance
+
+            returns = self.batchnorm_gae(returns)
 
             # memories dataset for updating actor and critic learning
 
