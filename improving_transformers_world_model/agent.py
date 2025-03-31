@@ -12,6 +12,8 @@ from torch.utils.data import TensorDataset, ConcatDataset, DataLoader
 from einops import rearrange, pack, unpack
 from einops.layers.torch import Reduce
 
+from improving_transformers_world_model.associative_scan import AssocScan
+
 from improving_transformers_world_model.world_model import (
     WorldModel
 )
@@ -75,24 +77,34 @@ def pack_one(t, pattern):
 # generalized advantage estimate
 
 def calc_gae(
-    rewards: Float['n'],
-    values: Float['n+1'],
-    masks: Bool['n'],
+    rewards: Float['... n'],
+    values: Float['... n+1'],
+    masks: Bool['... n'],
     gamma = 0.99,
     lam = 0.95
 ) -> Float['n']:
 
     device = rewards.device
 
-    gae = 0.
-    returns = torch.empty_like(rewards)
+    rewards, inverse_pack = pack_one(rewards, '* n')
+    values, _ = pack_one(values, '* n')
+    masks, _ = pack_one(masks, '* n')
 
-    for i in reversed(range(len(rewards))):
-        delta = rewards[i] + gamma * values[i + 1] * masks[i] - values[i]
-        gae = delta + gamma * lam * masks[i] * gae
-        returns[i] = gae + values[i]
+    values, values_next = values[:, :-1], values[:, 1:]
 
-    return returns
+    delta = rewards + gamma * values_next * masks - values
+    gates = gamma * lam * masks
+
+    gates, delta = gates[..., :, None], delta[..., :, None]
+
+    scan = AssocScan(reverse = True)
+    gae = scan(gates, delta)
+
+    gae = gae[..., :, 0]
+
+    returns = gae + values
+
+    return inverse_pack(returns)
 
 # symbol extractor
 # detailed in section C.3
