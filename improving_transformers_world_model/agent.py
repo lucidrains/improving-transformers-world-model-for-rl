@@ -539,7 +539,8 @@ class Agent(Module):
 
             # normalize the returns to zero mean unit variance
 
-            returns = self.batchnorm_gae(returns)
+            if returns.numel() > 1:
+                returns = self.batchnorm_gae(returns)
 
             # memories dataset for updating actor and critic learning
 
