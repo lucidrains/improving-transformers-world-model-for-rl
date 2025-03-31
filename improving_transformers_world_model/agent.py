@@ -81,9 +81,12 @@ def calc_gae(
     values: Float['... n+1'],
     masks: Bool['... n'],
     gamma = 0.99,
-    lam = 0.95
+    lam = 0.95,
+    use_accelerated = None
+
 ) -> Float['n']:
 
+    use_accelerated = default(use_accelerated, rewards.is_cuda)
     device = rewards.device
 
     rewards, inverse_pack = pack_one(rewards, '* n')
@@ -97,7 +100,7 @@ def calc_gae(
 
     gates, delta = gates[..., :, None], delta[..., :, None]
 
-    scan = AssocScan(reverse = True)
+    scan = AssocScan(reverse = True, use_accelerated = use_accelerated)
     gae = scan(gates, delta)
 
     gae = gae[..., :, 0]
