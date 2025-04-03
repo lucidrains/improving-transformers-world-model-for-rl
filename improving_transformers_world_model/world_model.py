@@ -647,9 +647,7 @@ class WorldModel(Module):
 
         assert prompt_time <= time_steps, f'nothing to sample, as prompt already is greater or equal to desired number of time steps'
 
-        patches = self.state_to_patches(prompt)
-
-        ids = self.tokenizer(patches)
+        ids = self.forward_tokenizer(prompt)
 
         if return_rewards_and_done:
 
@@ -725,6 +723,14 @@ class WorldModel(Module):
 
         return out, cache
 
+    def forward_tokenizer(
+        self,
+        state: Float['b c t h w']
+    ) -> Int['b n d']:
+
+        patches = self.state_to_patches(state)
+        return self.tokenizer(patches)
+
     def forward(
         self,
         state_or_token_ids: Float['b c t h w'] | Int['b t h w'],
@@ -744,9 +750,8 @@ class WorldModel(Module):
         assert xnor(exists(actions), self.can_cond_on_actions)
 
         if state_or_token_ids.dtype  == torch.float:
-            patches = self.state_to_patches(state_or_token_ids)
-
-            token_ids = self.tokenizer(patches, freeze = freeze_tokenizer)
+            state = state_or_token_ids
+            token_ids = self.forward_tokenizer(state)
         else:
             token_ids = state_or_token_ids
 
