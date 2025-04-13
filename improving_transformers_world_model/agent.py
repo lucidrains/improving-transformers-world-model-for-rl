@@ -12,7 +12,7 @@ from torch.utils.data import TensorDataset, ConcatDataset, DataLoader
 from einops import rearrange, pack, unpack
 from einops.layers.torch import Reduce, Rearrange
 
-from improving_transformers_world_model.associative_scan import AssocScan
+from assoc_scan import AssocScan
 
 from improving_transformers_world_model.world_model import (
     WorldModel
