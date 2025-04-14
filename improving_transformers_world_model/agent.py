@@ -574,7 +574,7 @@ class Agent(Module):
                     returns = returns
                 )
 
-                actor_loss.sum().backward()
+                actor_loss.mean().backward()
 
                 nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
 
@@ -588,7 +588,7 @@ class Agent(Module):
                     returns = returns
                 )
 
-                critic_loss.sum().backward()
+                critic_loss.mean().backward()
 
                 nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
 
