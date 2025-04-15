@@ -586,6 +586,8 @@ class WorldModel(Module):
         can_cond_on_actions = num_actions > 0
         self.can_cond_on_actions = can_cond_on_actions
 
+        self.action_embed_sos = nn.Parameter(torch.zeros(model_dim))
+
         self.action_embed = nn.Embedding(num_actions, model_dim) if can_cond_on_actions else None
 
         # reward related
@@ -745,6 +747,7 @@ class WorldModel(Module):
         return_loss_breakdown = False,
         freeze_tokenizer = True
     ):
+        batch = state_or_token_ids.shape[0]
 
         assert xnor(exists(rewards), self.can_pred_reward)
         assert xnor(exists(actions), self.can_cond_on_actions)
@@ -793,6 +796,9 @@ class WorldModel(Module):
 
             action_embeds = einx.where('b t n, b t n d, -> b t n d', ~no_actions, action_embeds, 0.)
             action_embeds = reduce(action_embeds, 'b t n d -> b t d', 'sum')
+
+            action_embed_sos = repeat(self.action_embed_sos, 'd -> b 1 d', b = batch)
+            action_embeds = cat((action_embed_sos, action_embeds[:, :-1]), dim = 1)
 
             tokens = einx.add('b t h w d, b t d -> b t h w d', tokens, action_embeds)
 
