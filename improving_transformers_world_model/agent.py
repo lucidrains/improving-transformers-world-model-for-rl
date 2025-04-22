@@ -540,7 +540,9 @@ class Agent(Module):
 
             # generalized advantage estimate
 
-            returns, gae = calc_target_and_gae(rewards, values_with_next, dones, lam = lam, gamma = gamma)
+            mask = 1. - dones.float()
+
+            returns, gae = calc_target_and_gae(rewards, values_with_next, mask, lam = lam, gamma = gamma)
 
             # memories dataset for updating actor and critic learning
 
