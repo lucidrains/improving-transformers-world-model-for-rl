@@ -101,12 +101,8 @@ def calc_target_and_gae(
     delta = rewards + gamma * values_next * masks - values
     gates = gamma * lam * masks
 
-    gates, delta = gates[..., :, None], delta[..., :, None]
-
     scan = AssocScan(reverse = True, use_accelerated = use_accelerated)
     gae = scan(gates, delta)
-
-    gae = gae[..., :, 0]
 
     returns = gae + values
 
