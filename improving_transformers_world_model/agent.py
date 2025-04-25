@@ -396,6 +396,8 @@ class Agent(Module):
         optim_klass = AdoptAtan2,
         actor_lr = 1e-4,
         critic_lr = 1e-4,
+        actor_weight_decay = 1e-3,
+        critic_weight_decay = 1e-3,
         max_grad_norm = 0.5,
         actor_optim_kwargs: dict = dict(),
         critic_optim_kwargs: dict = dict(),
@@ -429,8 +431,8 @@ class Agent(Module):
 
         self.max_grad_norm = max_grad_norm
 
-        self.actor_optim = optim_klass((*actor.parameters(), *impala.parameters()), lr = actor_lr, **actor_optim_kwargs)
-        self.critic_optim = optim_klass((*critic.parameters(), *impala.parameters()), lr = actor_lr, **actor_optim_kwargs)
+        self.actor_optim = optim_klass((*actor.parameters(), *impala.parameters()), lr = actor_lr, weight_decay = actor_weight_decay, **actor_optim_kwargs)
+        self.critic_optim = optim_klass((*critic.parameters(), *impala.parameters()), lr = critic_lr, weight_decay = critic_weight_decay, **critic_optim_kwargs)
 
         # use a batch norm for standardizing the target - section A.1.2 in paper
 
