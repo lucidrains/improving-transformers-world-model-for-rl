@@ -503,7 +503,7 @@ class Agent(Module):
 
         # value clipping
 
-        clipped_value = old_values + (critic_value - old_values).clamp(1. - eps, 1. + eps)
+        clipped_value = old_values + (critic_value - old_values).clamp(-eps, eps)
 
         clipped_loss = loss_fn(clipped_value, returns, reduction = 'none')
         loss = loss_fn(critic_logits, returns, reduction = 'none')
