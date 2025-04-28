@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from improving_transformers_world_model import (
@@ -8,7 +9,10 @@ from improving_transformers_world_model import (
 
 from improving_transformers_world_model.mock_env import Env
 
-def test_agent():
+@pytest.mark.parametrize('critic_use_regression', (False, True))
+def test_agent(
+    critic_use_regression
+):
 
     # world model
 
@@ -50,6 +54,7 @@ def test_agent():
         ),
         critic = dict(
             dim = 64,
+            use_regression = critic_use_regression
         )
     )
 

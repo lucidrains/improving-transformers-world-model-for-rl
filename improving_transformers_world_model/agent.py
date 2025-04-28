@@ -342,14 +342,14 @@ class Critic(Module):
 
         self.to_value_pred = HLGaussLayer(
             dim = dim,
-            hl_gauss_loss = hl_gauss_loss_kwargs
+            hl_gauss_loss = hl_gauss_loss_kwargs,
+            use_regression = use_regression
         )
 
     def forward(
         self,
         state: Float['b n d'],
-        returns: Float['b'] | None = None
-
+        return_value_and_logits = False
     ) -> Float['b'] | Float['']:
 
         embed = self.proj_in(state)
@@ -357,12 +357,7 @@ class Critic(Module):
         for layer in self.layers:
             embed = layer(embed) + embed
 
-        values = self.to_value_pred(embed)
-
-        if not exists(returns):
-            return values
-
-        return F.mse_loss(values, returns)
+        return self.to_value_pred(embed, return_value_and_logits = return_value_and_logits)
 
 # memory
 
@@ -391,8 +386,9 @@ class Agent(Module):
         impala: Impala | dict,
         actor: Actor | dict,
         critic: Critic | dict,
-        actor_eps_clip = 0.2, # clipping
-        actor_beta_s = .01,   # entropy weight
+        actor_eps_clip = 0.2,  # clipping
+        actor_beta_s = .01,    # entropy weight
+        critic_eps_clip = 0.4, # value clipping
         optim_klass = AdoptAtan2,
         actor_lr = 1e-4,
         critic_lr = 1e-4,
@@ -428,6 +424,8 @@ class Agent(Module):
 
         self.actor_eps_clip = actor_eps_clip
         self.actor_beta_s = actor_beta_s
+
+        self.critic_eps_clip = critic_eps_clip
 
         self.max_grad_norm = max_grad_norm
 
@@ -490,15 +488,27 @@ class Agent(Module):
     def critic_loss(
         self,
         states: Float['b c h w'],
+        old_values: Float['b'],
         returns: Float['b']
     ) -> Loss:
+
+        eps = self.critic_eps_clip
+        loss_fn = self.critic.to_value_pred.loss_fn
 
         self.critic.train()
 
         actor_critic_input, _ = self.impala(states)
-        critic_loss = self.critic(actor_critic_input, returns)
 
-        return critic_loss
+        critic_value, critic_logits = self.critic(actor_critic_input, return_value_and_logits = True)
+
+        # value clipping
+
+        clipped_value = old_values + (critic_value - old_values).clamp(1. - eps, 1. + eps)
+
+        clipped_loss = loss_fn(clipped_value, returns, reduction = 'none')
+        loss = loss_fn(critic_logits, returns, reduction = 'none')
+
+        return torch.max(clipped_loss, loss).mean()
 
     def learn(
         self,
@@ -521,9 +531,12 @@ class Agent(Module):
                 self.critic.eval()
 
                 next_state = rearrange(next_state, 'c 1 h w -> 1 c h w')
+                next_state = next_state.to(self.device)
 
                 actor_critic_input, _ = self.impala(next_state)
                 next_value = self.critic(actor_critic_input)
+
+                next_value = next_value.cpu()
 
             (
                 states,
@@ -560,7 +573,16 @@ class Agent(Module):
 
         for epoch in range(epochs):
 
-            for states, actions, action_log_probs, returns, values, dones in dataloader:
+            for batched_data in dataloader:
+
+                (
+                    states,
+                    actions,
+                    action_log_probs,
+                    returns,
+                    values,
+                    dones
+                ) = tuple(t.to(self.device) for t in batched_data)
 
                 returns = self.batchnorm_target(returns)
 
@@ -585,6 +607,7 @@ class Agent(Module):
 
                 critic_loss = self.critic_loss(
                     states = states,
+                    old_values = values,
                     returns = returns
                 )
 
