@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from math import ceil
+from functools import wraps
 
 import torch
 import torch.nn.functional as F
@@ -79,6 +80,25 @@ def is_empty(t):
 
 def cache_detach_(cache):
     return tree_map(lambda t: t.detach_() if is_tensor(t) else t, cache)
+
+def to_device(tree, device):
+    return tree_map(lambda t: t.to(device) if is_tensor(t) else t, tree)
+
+def inputs_to_model_device(fn):
+    @wraps(fn)
+    def inner(self, *args, **kwargs):
+        args, kwargs = to_device((args, kwargs), self.device)
+        return fn(self, *args, **kwargs)
+    return inner
+
+def outputs_to_device(device):
+    def decorator(fn):
+        @wraps(fn)
+        def inner(*args, **kwargs):
+            out = fn(*args, **kwargs)
+            return to_device(out, device)
+        return inner
+    return decorator
 
 # sampling related
 
@@ -626,6 +646,10 @@ class WorldModel(Module):
 
         self.register_buffer('zero', tensor(0.), persistent = False)
 
+    @property
+    def device(self):
+        return self.zero.device
+
     @torch.no_grad()
     def sample(
         self,
@@ -733,6 +757,7 @@ class WorldModel(Module):
         patches = self.state_to_patches(state)
         return self.tokenizer(patches)
 
+    @inputs_to_model_device
     def forward(
         self,
         state_or_token_ids: Float['b c t h w'] | Int['b t h w'],

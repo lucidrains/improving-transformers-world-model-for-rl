@@ -15,7 +15,9 @@ from einops.layers.torch import Reduce, Rearrange
 from assoc_scan import AssocScan
 
 from improving_transformers_world_model.world_model import (
-    WorldModel
+    WorldModel,
+    inputs_to_model_device,
+    outputs_to_device
 )
 
 from improving_transformers_world_model.tensor_typing import (
@@ -202,6 +204,15 @@ class Impala(Module):
 
         self.output_dims = (impala_ccn_output_dim, dim_rnn)
 
+        # device tracking
+
+        self.register_buffer('dummy', tensor(0), persistent = False)
+
+    @property
+    def device(self):
+        return self.dummy.device
+
+    @inputs_to_model_device
     def forward(
         self,
         state: Float['b c h w'] | Float['b c t h w'],
@@ -633,7 +644,9 @@ class Agent(Module):
 
         memories = default(memories, [])
 
-        next_state = env.reset()
+        to_device_decorator = outputs_to_device(self.device)
+
+        next_state = to_device_decorator(env.reset)()
 
         # prepare for looping with world model
         # gathering up all the memories of states, actions, rewards for training
@@ -657,7 +670,7 @@ class Agent(Module):
 
             action, action_log_prob = self.actor(actor_critic_input, sample_action = True)
 
-            next_state, next_reward, next_done = env(action)
+            next_state, next_reward, next_done = to_device_decorator(env)(action)
 
             action = rearrange(action, '1 -> 1 1 1')
             action_log_prob = rearrange(action_log_prob, '1 -> 1 1')
@@ -707,6 +720,7 @@ class Agent(Module):
         return MemoriesWithNextState(memories, next_state, from_real_env = True)
 
     @torch.no_grad()
+    @inputs_to_model_device
     def forward(
         self,
         world_model: WorldModel,

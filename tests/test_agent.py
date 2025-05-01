@@ -9,6 +9,8 @@ from improving_transformers_world_model import (
 
 from improving_transformers_world_model.mock_env import Env
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 @pytest.mark.parametrize('critic_use_regression', (False, True))
 def test_agent(
     critic_use_regression
@@ -31,7 +33,7 @@ def test_agent(
             dim = 7 * 7 * 3,
             distance_threshold = 0.5
         )
-    )
+    ).to(device)
 
     state = torch.randn(2, 3, 20, 63, 63)
     rewards = torch.randint(0, 10, (2, 20)).float()
@@ -56,7 +58,7 @@ def test_agent(
             dim = 64,
             use_regression = critic_use_regression
         )
-    )
+    ).to(device)
 
     env = Env((3, 63, 63))
 
@@ -84,7 +86,7 @@ def world_model_burn_in():
             dim = 7 * 7 * 3,
             distance_threshold = 0.5
         )
-    )
+    ).to(device)
 
     state = torch.randn(2, 3, 20, 63, 63) # batch, channels, time, height, width - craftax is 3 channels 63x63, and they used rollout of 20 frames. block size is presumably each image
     rewards = torch.randint(0, 10, (2, 20)).float()
