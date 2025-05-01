@@ -12,8 +12,10 @@ from improving_transformers_world_model.mock_env import Env
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 @pytest.mark.parametrize('critic_use_regression', (False, True))
+@pytest.mark.parametrize('actor_use_world_model_embed', (False, True))
 def test_agent(
-    critic_use_regression
+    critic_use_regression,
+    actor_use_world_model_embed
 ):
 
     # world model
@@ -53,6 +55,7 @@ def test_agent(
         actor = dict(
             dim = 32,
             num_actions = 5,
+            dim_world_model_embed = 32 if actor_use_world_model_embed else None
         ),
         critic = dict(
             dim = 64,
@@ -62,9 +65,17 @@ def test_agent(
 
     env = Env((3, 63, 63))
 
-    dream_memories = agent(world_model, state[0, :, 0], max_steps = 5)
+    dream_memories = agent(
+        world_model,
+        state[0, :, 0],
+        max_steps = 5
+    )
 
-    real_memories = agent.interact_with_env(env, max_steps = 5)
+    real_memories = agent.interact_with_env(
+        env,
+        world_model = world_model if actor_use_world_model_embed else None,
+        max_steps = 5
+    )
 
     agent.learn([dream_memories, real_memories])
 
@@ -92,6 +103,9 @@ def world_model_burn_in():
     rewards = torch.randint(0, 10, (2, 20)).float()
     actions = torch.randint(0, 5, (2, 20, 1))
     is_terminal = torch.randint(0, 2, (2, 20)).bool()
+
+    loss = world_model(state, actions = actions, rewards = rewards, is_terminal = is_terminal)
+    loss.backward()
 
     _, burn_in_cache = world_model(
         state,

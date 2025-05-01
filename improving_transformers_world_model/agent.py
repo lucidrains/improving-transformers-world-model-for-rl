@@ -112,6 +112,30 @@ def calc_target_and_gae(
 
     return returns, gae
 
+# FiLM for conditioning policy network on world model embed - suggested for follow up research in the paper
+
+class FiLM(Module):
+    def __init__(
+        self,
+        dim,
+        dim_out
+    ):
+        super().__init__()
+        self.to_gamma = nn.Linear(dim, dim_out, bias = False)
+        self.to_beta = nn.Linear(dim, dim_out, bias = False)
+
+        nn.init.zeros_(self.to_gamma.weight)
+        nn.init.zeros_(self.to_beta.weight)
+
+    def forward(
+        self,
+        x: Float['... d'],
+        cond: Float['... d']
+    ):
+        gamma, beta = self.to_gamma(cond), self.to_beta(cond)
+
+        return x * (gamma + 1.) + beta
+
 # symbol extractor
 # detailed in section C.3
 
@@ -267,6 +291,7 @@ class Actor(Module):
         dim,
         *,
         num_actions,
+        dim_world_model_embed = None,
         num_layers = 3,
         expansion_factor = 2.,
     ):
@@ -292,9 +317,17 @@ class Actor(Module):
 
         self.to_actions_pred = nn.Linear(dim, num_actions)
 
+        # able to condition on world model embed when predicting action - using classic film
+
+        self.can_cond_on_world_model = exists(dim_world_model_embed)
+
+        if self.can_cond_on_world_model:
+            self.world_model_film = FiLM(dim_world_model_embed, dim)
+
     def forward(
         self,
         state: Float['b c h w'],
+        world_model_embed: Float['b d'] | None = None,
         sample_action = False
     ) -> (
         Float['b'] |
@@ -302,6 +335,11 @@ class Actor(Module):
     ):
 
         embed = self.proj_in(state)
+
+        if exists(world_model_embed):
+            assert exists(self.world_model_film), f'`dim_world_model_embed` must be set on `Actor` to utilize world model for prediction'
+
+            embed = self.world_model_film(embed, world_model_embed)
 
         for layer in self.layers:
             embed = layer(embed) + embed
@@ -636,6 +674,7 @@ class Agent(Module):
         self,
         env,
         memories: Memories | None = None,
+        world_model: WorldModel | None = None,
         max_steps = float('inf')
 
     ) -> MemoriesWithNextState:
@@ -662,13 +701,39 @@ class Agent(Module):
         last_done = dones[0, -1]
         time_step = states.shape[2] + 1
 
+        # maybe conditioning actor with learned world model embed
+
+        if exists(world_model):
+            world_model_cache = None
+
         while time_step < max_steps and not last_done:
+
+            world_model_embed = None
+
+            if exists(world_model):
+                with torch.no_grad():
+                    world_model.eval()
+
+                    world_model_embed, world_model_cache = world_model(
+                        state_or_token_ids = states[:, :, -1:],
+                        actions = actions[:, -1:],
+                        rewards = rewards[:, -1:],
+                        cache = world_model_cache,
+                        remove_cache_len_from_time = False,
+                        return_embed = True,
+                        return_cache = True,
+                        return_loss = False
+                    )
+
+                    world_model_embed = rearrange(world_model_embed, '1 1 d -> 1 d')
+
+            # impala + actor - todo: cleanup the noisy tensor (un)squeezing ops
 
             next_state = rearrange(next_state, 'c h w -> 1 c h w')
 
             actor_critic_input, rnn_hidden = self.impala(next_state)
 
-            action, action_log_prob = self.actor(actor_critic_input, sample_action = True)
+            action, action_log_prob = self.actor(actor_critic_input, world_model_embed = world_model_embed, sample_action = True)
 
             next_state, next_reward, next_done = to_device_decorator(env)(action)
 

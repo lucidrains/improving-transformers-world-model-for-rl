@@ -770,6 +770,7 @@ class WorldModel(Module):
         detach_cache = False,
         return_loss = True,
         return_loss_breakdown = False,
+        return_embed = False,
         freeze_tokenizer = True
     ):
         batch = state_or_token_ids.shape[0]
@@ -784,12 +785,18 @@ class WorldModel(Module):
             token_ids = state_or_token_ids
 
         if return_loss:
+            assert token_ids.shape[1] > 1
+
             token_ids, state_labels = token_ids[:, :-1], token_ids[:, 1:]
 
-            is_terminal_labels = is_terminal[:, 1:]
+            if exists(is_terminal):
+                is_terminal_labels = is_terminal[:, 1:]
 
-            actions, last_action = actions[:, :-1], actions[:, -1:]
-            rewards, last_reward = rewards[:, :-1], rewards[:, -1:]
+            if exists(actions):
+                actions, last_action = actions[:, :-1], actions[:, -1:]
+
+            if exists(rewards):
+                rewards, last_reward = rewards[:, :-1], rewards[:, -1:]
 
         # either use own learned token embeddings
         # or project the codes (which are just the nearest neighbor memorized patch) and project
@@ -819,7 +826,9 @@ class WorldModel(Module):
             actions = actions.masked_fill(no_actions, 0)
             action_embeds = self.action_embed(actions)
 
-            action_embeds = einx.where('b t n, b t n d, -> b t n d', ~no_actions, action_embeds, 0.)
+            if not is_empty(action_embeds):
+                action_embeds = einx.where('b t n, b t n d, -> b t n d', ~no_actions, action_embeds, 0.)
+
             action_embeds = reduce(action_embeds, 'b t n d -> b t d', 'sum')
 
             action_embed_sos = repeat(self.action_embed_sos, 'd -> b 1 d', b = batch)
@@ -862,6 +871,14 @@ class WorldModel(Module):
             embeds_with_space = inverse_space(embeds, 'b * d')
 
             embeds_with_time = reduce(embeds_with_space, 'b ... d -> b 1 d', 'mean')
+
+        # maybe return embed
+
+        if return_embed:
+            if not return_cache:
+                return embeds_with_time
+
+            return embeds_with_time, next_cache
 
         # reward and terminal
 
