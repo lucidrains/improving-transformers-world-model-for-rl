@@ -576,6 +576,8 @@ class WorldModel(Module):
             transformer = BlockCausalTransformer(**transformer)
 
         self.transformer = transformer
+        self.dim = transformer.dim
+
         assert transformer.block_size == patches_per_image, f'transformer block size is recommended to be the number of patches per game image, which is {patches_per_image}'
 
         if isinstance(tokenizer, dict):

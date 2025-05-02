@@ -3,7 +3,7 @@ from typing import NamedTuple, Deque
 from collections import deque
 
 import torch
-from torch import nn, cat, stack, tensor, Tensor
+from torch import nn, cat, stack, is_tensor, tensor, Tensor
 from torch.nn import Module, ModuleList, GRU
 
 import torch.nn.functional as F
@@ -47,6 +47,9 @@ def is_odd(num):
     return not divisible_by(num, 2)
 
 # tensor helpers
+
+def is_empty(t):
+    return t.numel() == 0
 
 def log(t, eps = 1e-20):
     return torch.log(t.clamp(min = eps))
@@ -337,7 +340,7 @@ class Actor(Module):
         embed = self.proj_in(state)
 
         if exists(world_model_embed):
-            assert exists(self.world_model_film), f'`dim_world_model_embed` must be set on `Actor` to utilize world model for prediction'
+            assert self.can_cond_on_world_model, f'`dim_world_model_embed` must be set on `Actor` to utilize world model for prediction'
 
             embed = self.world_model_film(embed, world_model_embed)
 
@@ -421,11 +424,13 @@ class Memory(NamedTuple):
     reward:          Scalar
     value:           Scalar
     done:            Bool['']
+    world_embed:     Float['d'] | None
 
 class MemoriesWithNextState(NamedTuple):
-    memories:         Deque[Memory]
-    next_state:       FrameState
-    from_real_env:    bool
+    memories:               Deque[Memory]
+    next_state:             FrameState
+    from_real_env:          bool
+    has_world_model_embed:  bool
 
 # actor critic agent
 
@@ -506,6 +511,7 @@ class Agent(Module):
         old_log_probs: Float['b'],
         values: Float['b'],
         returns: Float['b'],
+        world_model_embeds: Float['b d'] | None = None
     ) -> Loss:
 
         self.actor.train()
@@ -514,7 +520,7 @@ class Agent(Module):
         advantages = F.layer_norm(returns - values, (batch,))
 
         actor_critic_input, _ = self.impala(states)
-        action_logits = self.actor(actor_critic_input)
+        action_logits = self.actor(actor_critic_input, world_model_embed = world_model_embeds)
 
         prob = action_logits.softmax(dim = -1)
 
@@ -572,9 +578,11 @@ class Agent(Module):
         if isinstance(memories, MemoriesWithNextState):
             memories = [memories]
 
+        assert len({one_memory.has_world_model_embed for one_memory in memories}) == 1, 'memories must either all use world embed or not'
+
         datasets = []
 
-        for one_memories, next_state, from_real_env in memories:
+        for one_memories, next_state, from_real_env, _ in memories:
 
             with torch.no_grad():
                 self.critic.eval()
@@ -594,6 +602,7 @@ class Agent(Module):
                 rewards,
                 values,
                 dones,
+                world_model_embeds
             ) = map(stack, zip(*list(one_memories)))
 
             values_with_next = cat((values, next_value), dim = 0)
@@ -606,7 +615,7 @@ class Agent(Module):
 
             # memories dataset for updating actor and critic learning
 
-            dataset = TensorDataset(states, actions, action_log_probs, returns, values, dones)
+            dataset = TensorDataset(states, actions, action_log_probs, returns, values, dones, world_model_embeds)
 
             datasets.append(dataset)
 
@@ -630,7 +639,8 @@ class Agent(Module):
                     action_log_probs,
                     returns,
                     values,
-                    dones
+                    dones,
+                    world_model_embeds
                 ) = tuple(t.to(self.device) for t in batched_data)
 
                 returns = self.batchnorm_target(returns)
@@ -642,7 +652,8 @@ class Agent(Module):
                     actions = actions,
                     old_log_probs = action_log_probs,
                     values = values,
-                    returns = returns
+                    returns = returns,
+                    world_model_embeds = world_model_embeds if not is_empty(world_model_embeds) else None
                 )
 
                 actor_loss.mean().backward()
@@ -703,6 +714,9 @@ class Agent(Module):
 
         # maybe conditioning actor with learned world model embed
 
+        world_model_dim = world_model.dim if exists(world_model) else 0
+        world_model_embeds = torch.empty((1, 0, world_model_dim), device = device, dtype = torch.float32)
+
         if exists(world_model):
             world_model_cache = None
 
@@ -752,6 +766,12 @@ class Agent(Module):
             next_done = rearrange(next_done, '1 -> 1 1')
             dones = cat((dones, next_done), dim = -1)
 
+            if exists(world_model_embed):
+                next_embed = rearrange(world_model_embed, '... -> 1 ...')
+                world_model_embeds = cat((world_model_embeds, next_embed), dim = 1)
+            else:
+                world_model_embeds = world_model_embeds.reshape(1, time_step + 1, 0)
+
             time_step += 1
             last_done = dones[0, -1]
 
@@ -763,7 +783,7 @@ class Agent(Module):
 
         # move all intermediates to cpu and detach and store into memory for learning actor and critic
 
-        states, actions, action_log_probs, rewards, values, dones = tuple(rearrange(t, '1 ... -> ...').cpu() for t in (states, actions, action_log_probs, rewards, values, dones))
+        states, actions, action_log_probs, rewards, values, dones, world_model_embeds = tuple(rearrange(t, '1 ... -> ...').cpu() for t in (states, actions, action_log_probs, rewards, values, dones, world_model_embeds))
 
         states, next_state = states[:, :-1], states[:, -1:]
 
@@ -778,11 +798,12 @@ class Agent(Module):
             rewards,
             values,
             dones,
+            world_model_embeds
         ))
 
         memories.extend(episode_memories)
 
-        return MemoriesWithNextState(memories, next_state, from_real_env = True)
+        return MemoriesWithNextState(memories, next_state, from_real_env = True, has_world_model_embed = exists(world_model))
 
     @torch.no_grad()
     @inputs_to_model_device
@@ -791,8 +812,8 @@ class Agent(Module):
         world_model: WorldModel,
         init_state: FrameState,
         memories: Memories | None = None,
-        max_steps = float('inf')
-
+        max_steps = float('inf'),
+        use_world_model_embed = False
     ) -> MemoriesWithNextState:
 
         device = init_state.device
@@ -817,19 +838,47 @@ class Agent(Module):
         last_done = dones[0, -1]
         time_step = states.shape[2] + 1
 
+        world_model_dim = world_model.dim if use_world_model_embed else 0
+        world_model_embeds = torch.empty((1, 0, world_model_dim), device = device, dtype = torch.float32)
+
         world_model_cache = None
 
         while time_step < max_steps and not last_done:
 
+            world_model_embed = None
+
+            if use_world_model_embed:
+                with torch.no_grad():
+                    world_model.eval()
+
+                    world_model_embed, _ = world_model(
+                        state_or_token_ids = states[:, :, -1:],
+                        actions = actions[:, -1:],
+                        rewards = rewards[:, -1:],
+                        cache = world_model_cache,
+                        remove_cache_len_from_time = False,
+                        return_embed = True,
+                        return_cache = True,
+                        return_loss = False
+                    )
+
+                    world_model_embed = rearrange(world_model_embed, '1 1 d -> 1 d')
+
             actor_critic_input, rnn_hiddens = self.impala(next_state)
 
-            action, action_log_prob = self.actor(actor_critic_input, sample_action = True)
+            action, action_log_prob = self.actor(actor_critic_input, world_model_embed = world_model_embed, sample_action = True)
 
             action = rearrange(action, 'b -> b 1 1')
             action_log_prob = rearrange(action_log_prob, 'b -> b 1')
 
             actions = cat((actions, action), dim = 1)
             action_log_probs = cat((action_log_probs, action_log_prob), dim = 1)
+
+            if exists(world_model_embed):
+                next_embed = rearrange(world_model_embed, '... -> 1 ...')
+                world_model_embeds = cat((world_model_embeds, next_embed), dim = 1)
+            else:
+                world_model_embeds = world_model_embeds.reshape(1, time_step + 1, 0)
 
             (states, rewards, dones), world_model_cache = world_model.sample(
                 prompt = states,
@@ -852,7 +901,7 @@ class Agent(Module):
 
         # move all intermediates to cpu and detach and store into memory for learning actor and critic
 
-        states, actions, action_log_probs, rewards, values, dones = tuple(rearrange(t, '1 ... -> ...').cpu() for t in (states, actions, action_log_probs, rewards, values, dones))
+        states, actions, action_log_probs, rewards, values, dones, world_model_embeds = tuple(rearrange(t, '1 ... -> ...').cpu() for t in (states, actions, action_log_probs, rewards, values, dones, world_model_embeds))
 
         states, next_state = states[:, :-1], states[:, -1:]
 
@@ -867,8 +916,9 @@ class Agent(Module):
             rewards,
             values,
             dones,
+            world_model_embeds
         ))
 
         memories.extend(episode_memories)
 
-        return MemoriesWithNextState(memories, next_state, from_real_env = False)
+        return MemoriesWithNextState(memories, next_state, from_real_env = False, has_world_model_embed = use_world_model_embed)

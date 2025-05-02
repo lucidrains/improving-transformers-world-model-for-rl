@@ -68,7 +68,8 @@ def test_agent(
     dream_memories = agent(
         world_model,
         state[0, :, 0],
-        max_steps = 5
+        max_steps = 5,
+        use_world_model_embed = actor_use_world_model_embed
     )
 
     real_memories = agent.interact_with_env(
